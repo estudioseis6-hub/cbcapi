@@ -16,7 +16,7 @@ app.add_middleware(
 )
 
 import os
-DB = os.environ.get("DATABASE_URL")sslmode=require"
+DB = os.environ.get("DATABASE_URL")
 
 def get_conn():
     return psycopg2.connect(DB, cursor_factory=RealDictCursor)
