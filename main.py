@@ -169,3 +169,13 @@ def crear_comprobante(c: ComprobanteIn):
         return {"ok": True}
     finally:
         conn.close()
+
+@app.get("/plan_cuentas")
+def get_plan_cuentas():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT niv1_desc, niv2_desc, nombre, signo FROM plan_de_cuentas ORDER BY niv1,niv2,niv3,niv4,niv5")
+            return cur.fetchall()
+    finally:
+        conn.close()
