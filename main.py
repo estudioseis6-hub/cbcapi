@@ -42,6 +42,34 @@ def get_fondos():
     finally:
         conn.close()
 
+@app.get("/fondos_admin")
+def get_fondos_admin():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, nombre, tipo, moneda, saldo_inicial, activo, es_sistema FROM fondos ORDER BY id")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+class FondoIn(BaseModel):
+    nombre: str
+    tipo: str
+    moneda: str
+    saldo_inicial: float
+
+@app.post("/fondos")
+def crear_fondo(f: FondoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO fondos (nombre, tipo, moneda, saldo_inicial, es_sistema) VALUES (%s, %s, %s, %s, false)",
+                       (f.nombre, f.tipo, f.moneda, f.saldo_inicial))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
 @app.get("/titulares")
 def get_titulares():
     conn = get_conn()
