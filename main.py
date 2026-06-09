@@ -179,3 +179,22 @@ def get_plan_cuentas():
             return cur.fetchall()
     finally:
         conn.close()
+
+@app.get("/balance")
+def get_balance(mes: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where_mes = f"AND EXTRACT(MONTH FROM c.fecha)={mes}" if mes else ""
+            cur.execute(f"""
+                SELECT p.niv2_desc subtipo, p.nombre cuenta, COALESCE(SUM(c.importe),0) importe
+                FROM plan_de_cuentas p
+                LEFT JOIN cashflow c ON c.cod_cuenta = p.nombre {where_mes}
+                WHERE p.niv1=1
+                GROUP BY p.niv2_desc, p.nombre, p.niv1, p.niv2, p.niv3, p.niv4, p.niv5
+                HAVING COALESCE(SUM(c.importe),0) <> 0
+                ORDER BY p.niv1, p.niv2, p.niv3, p.niv4, p.niv5
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
