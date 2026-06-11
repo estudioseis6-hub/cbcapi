@@ -79,8 +79,48 @@ def get_titulares():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, nombre, nivel1 FROM titulares ORDER BY CASE WHEN nivel1='SISTEMA' THEN 0 ELSE 1 END, nombre")
+            cur.execute("""
+                SELECT id, nombre, nivel1,
+                       COALESCE(tipo_titular, 'PROVEEDOR') tipo_titular,
+                       COALESCE(plazo_pago, 0) plazo_pago
+                FROM titulares
+                ORDER BY CASE WHEN nivel1='SISTEMA' THEN 0 ELSE 1 END, nombre
+            """)
             return cur.fetchall()
+    finally:
+        conn.close()
+
+class TitularIn(BaseModel):
+    nombre: str
+    nivel1: str
+    tipo_titular: str
+    plazo_pago: int
+
+@app.post("/titulares")
+def crear_titular(t: TitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO titulares (nombre, nivel1, tipo_titular, plazo_pago)
+                VALUES (%s, %s, %s, %s)
+            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/titulares/{id}")
+def actualizar_titular(id: int, t: TitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE titulares SET nombre=%s, nivel1=%s, tipo_titular=%s, plazo_pago=%s
+                WHERE id=%s
+            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago, id))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -196,68 +236,4 @@ def crear_comprobante(c: ComprobanteIn):
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (fecha, c.id_titular, c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
-        conn.commit()
-        return {"ok": True}
-    finally:
-        conn.close()
-
-@app.get("/plan_cuentas")
-def get_plan_cuentas():
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT niv1_desc, niv2_desc, nombre, signo FROM plan_de_cuentas ORDER BY niv1,niv2,niv3,niv4,niv5")
-            return cur.fetchall()
-    finally:
-        conn.close()
-
-@app.get("/balance")
-def get_balance(mes: Optional[int] = None):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            where_mes = f"AND EXTRACT(MONTH FROM c.fecha)={mes}" if mes else ""
-            cur.execute(f"""
-                SELECT p.niv2_desc subtipo, p.nombre cuenta, COALESCE(SUM(c.importe),0) importe
-                FROM plan_de_cuentas p
-                LEFT JOIN cashflow c ON c.cod_cuenta = p.nombre {where_mes}
-                WHERE p.niv1=1
-                GROUP BY p.niv2_desc, p.nombre, p.niv1, p.niv2, p.niv3, p.niv4, p.niv5
-                HAVING COALESCE(SUM(c.importe),0) <> 0
-                ORDER BY p.niv1, p.niv2, p.niv3, p.niv4, p.niv5
-            """)
-            return cur.fetchall()
-    finally:
-        conn.close()
-
-class PagoIn(BaseModel):
-    fecha: str
-    id_titular: int
-    id_fondo: int
-    cod_cuenta: str
-    detalle: str
-    ids_operaciones: list[int]
-
-@app.post("/registrar_pago")
-def registrar_pago(p: PagoIn):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
-            total = cur.fetchone()["coalesce"]
-
-            fecha = date.fromisoformat(p.fecha)
-            cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (fecha.month, fecha, p.id_titular, p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
-            id_pago = cur.fetchone()["id"]
-
-            cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
-
-        conn.commit()
-        return {"ok": True, "id_pago": id_pago, "total": total}
-    finally:
-        conn.close()
+            """, (fecha, c.id_titular, c.id_tip
