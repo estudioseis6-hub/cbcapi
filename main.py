@@ -164,7 +164,7 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             elif estado == "PAGO":
                 where.append("o.id_pago IS NOT NULL")
             sql = """
-                SELECT o.id, o.fecha, t.nombre titular, tc.descripcion tipo,
+                SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo,
                        o.numero_comprobante numero, o.descripcion concepto, o.importe,
                        CASE WHEN o.id_pago IS NULL THEN 'IMPAGO' ELSE 'PAGO' END estado
                 FROM operaciones o
