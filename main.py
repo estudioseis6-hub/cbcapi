@@ -230,3 +230,34 @@ def get_balance(mes: Optional[int] = None):
             return cur.fetchall()
     finally:
         conn.close()
+
+class PagoIn(BaseModel):
+    fecha: str
+    id_titular: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    ids_operaciones: list[int]
+
+@app.post("/registrar_pago")
+def registrar_pago(p: PagoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
+            total = cur.fetchone()["coalesce"]
+
+            fecha = date.fromisoformat(p.fecha)
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (fecha.month, fecha, p.id_titular, p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+            id_pago = cur.fetchone()["id"]
+
+            cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
+
+        conn.commit()
+        return {"ok": True, "id_pago": id_pago, "total": total}
+    finally:
+        conn.close()
