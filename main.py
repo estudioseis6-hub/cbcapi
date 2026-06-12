@@ -30,7 +30,6 @@ def root():
 
 @app.get("/ping")
 def ping():
-    # Consulta liviana para mantener despierta la base de Neon (evita cold-start)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -94,7 +93,9 @@ def get_titulares():
             cur.execute("""
                 SELECT id, nombre, nivel1,
                        COALESCE(tipo_titular, 'PROVEEDOR') tipo_titular,
-                       COALESCE(plazo_pago, 0) plazo_pago
+                       COALESCE(plazo_pago, 0) plazo_pago,
+                       cod1, cod2, cod3, cod4, cod5,
+                       fondo_def
                 FROM titulares
                 ORDER BY CASE WHEN nivel1='SISTEMA' THEN 0 ELSE 1 END, nombre
             """)
@@ -263,7 +264,6 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             where = []
             params = []
             if id_titular:
-                # id_titular en la base es texto (varchar); comparar como string
                 where.append("o.id_titular = %s")
                 params.append(str(id_titular))
             if estado == "IMPAGO":
@@ -302,7 +302,6 @@ def crear_comprobante(c: ComprobanteIn):
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
-
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -359,7 +358,11 @@ def get_plan_cuentas():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT niv1_desc, niv2_desc, nombre, signo FROM plan_de_cuentas ORDER BY niv1,niv2,niv3,niv4,niv5")
+            cur.execute("""
+                SELECT niv1_desc, niv2_desc, nombre, signo, fondo
+                FROM plan_de_cuentas
+                ORDER BY niv1,niv2,niv3,niv4,niv5
+            """)
             return cur.fetchall()
     finally:
         conn.close()
