@@ -108,6 +108,12 @@ class TitularIn(BaseModel):
     nivel1: str
     tipo_titular: str
     plazo_pago: int
+    cod1: Optional[str] = None
+    cod2: Optional[str] = None
+    cod3: Optional[str] = None
+    cod4: Optional[str] = None
+    cod5: Optional[str] = None
+    fondo_def: Optional[str] = None
 
 @app.post("/titulares")
 def crear_titular(t: TitularIn):
@@ -115,9 +121,9 @@ def crear_titular(t: TitularIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO titulares (nombre, nivel1, tipo_titular, plazo_pago)
-                VALUES (%s, %s, %s, %s)
-            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago))
+                INSERT INTO titulares (nombre, nivel1, tipo_titular, plazo_pago, cod1, cod2, cod3, cod4, cod5, fondo_def)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago, t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.fondo_def))
         conn.commit()
         return {"ok": True}
     finally:
@@ -129,9 +135,11 @@ def actualizar_titular(id: int, t: TitularIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE titulares SET nombre=%s, nivel1=%s, tipo_titular=%s, plazo_pago=%s
+                UPDATE titulares SET nombre=%s, nivel1=%s, tipo_titular=%s, plazo_pago=%s,
+                       cod1=%s, cod2=%s, cod3=%s, cod4=%s, cod5=%s, fondo_def=%s
                 WHERE id=%s
-            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago, id))
+            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago,
+                  t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.fondo_def, id))
         conn.commit()
         return {"ok": True}
     finally:
