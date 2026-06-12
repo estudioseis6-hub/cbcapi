@@ -28,6 +28,18 @@ def get_conn():
 def root():
     return {"status": "ok"}
 
+@app.get("/ping")
+def ping():
+    # Consulta liviana para mantener despierta la base de Neon (evita cold-start)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
 @app.get("/fondos")
 def get_fondos():
     conn = get_conn()
@@ -249,8 +261,11 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
     try:
         with conn.cursor() as cur:
             where = []
+            params = []
             if id_titular:
-                where.append(f"o.id_titular = {id_titular}")
+                # id_titular en la base es texto (varchar); comparar como string
+                where.append("o.id_titular = %s")
+                params.append(str(id_titular))
             if estado == "IMPAGO":
                 where.append("o.id_pago IS NULL")
             elif estado == "PAGO":
@@ -266,7 +281,7 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             if where:
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY o.fecha DESC LIMIT 200"
-            cur.execute(sql)
+            cur.execute(sql, params)
             return cur.fetchall()
     finally:
         conn.close()
