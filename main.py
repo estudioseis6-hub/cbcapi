@@ -162,7 +162,6 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
 
 @app.get("/vencimientos")
 def get_vencimientos():
-    """Movimientos proyectados (confirmado=false) con fecha <= hoy"""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -184,14 +183,12 @@ class ConfirmarPagoIn(BaseModel):
 
 @app.post("/vencimientos/{id}/confirmar")
 def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
-    """Confirma un movimiento proyectado — lo marca como real"""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(body.fecha) if body and body.fecha else date.today()
-            cur.execute("""
-                UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s
-            """, (fecha, fecha.month, id))
+            cur.execute("UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s",
+                        (fecha, fecha.month, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -202,14 +199,12 @@ class ReprogramarIn(BaseModel):
 
 @app.post("/vencimientos/{id}/reprogramar")
 def reprogramar_vencimiento(id: int, body: ReprogramarIn):
-    """Reprograma un movimiento proyectado a nueva fecha"""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(body.fecha)
-            cur.execute("""
-                UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s
-            """, (fecha, fecha.month, id))
+            cur.execute("UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s",
+                        (fecha, fecha.month, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -284,7 +279,7 @@ class ComprobanteIn(BaseModel):
     descripcion: str
     importe: float
     id_fondo: Optional[int] = None
-    fecha_vencimiento: Optional[str] = None  # si el frontend ya la calculó o la pidió al usuario
+    fecha_vencimiento: Optional[str] = None
 
 @app.post("/operaciones")
 def crear_comprobante(c: ComprobanteIn):
@@ -293,23 +288,20 @@ def crear_comprobante(c: ComprobanteIn):
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
 
-            # 1. Guardar en operaciones
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (fecha, c.id_titular, c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
+            """, (fecha, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
             id_operacion = cur.fetchone()["id"]
 
-            # 2. Leer plazo del titular si no se pasó fecha_vencimiento
             plazo = None
             if not c.fecha_vencimiento:
-                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (c.id_titular,))
+                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
                 row = cur.fetchone()
                 if row and row["plazo_pago"] and row["plazo_pago"] > 0:
                     plazo = row["plazo_pago"]
 
-            # 3. Si hay fecha de vencimiento (pasada o calculada), crear cashflow proyectado
             if c.fecha_vencimiento or plazo:
                 if c.fecha_vencimiento:
                     fecha_vto = date.fromisoformat(c.fecha_vencimiento)
@@ -318,8 +310,7 @@ def crear_comprobante(c: ComprobanteIn):
 
                 id_fondo = c.id_fondo
                 if not id_fondo:
-                    # Usar fondo_def del titular si existe
-                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (c.id_titular,))
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
                     r = cur.fetchone()
                     if r and r["fondo_def"]:
                         id_fondo = r["fondo_def"]
@@ -328,17 +319,16 @@ def crear_comprobante(c: ComprobanteIn):
                     cur.execute("""
                         INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-                    """, (fecha_vto.month, fecha_vto, c.id_titular, c.descripcion, -abs(c.importe), id_fondo, id_operacion))
+                    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(c.importe), id_fondo, id_operacion))
 
                 conn.commit()
                 return {
                     "ok": True,
                     "id_operacion": id_operacion,
                     "proyectado": True,
-                    "fecha_vencimiento": str(fecha_vto) if (c.fecha_vencimiento or plazo) else None
+                    "fecha_vencimiento": str(fecha_vto)
                 }
             else:
-                # Sin plazo y sin fecha_vencimiento — avisar al frontend para que pregunte
                 conn.commit()
                 return {
                     "ok": True,
@@ -399,7 +389,7 @@ def registrar_pago(p: PagoIn):
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, true)
                 RETURNING id
-            """, (fecha.month, fecha, p.id_titular, p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
             id_pago = cur.fetchone()["id"]
 
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
