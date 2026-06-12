@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 from pydantic import BaseModel
 
@@ -145,7 +145,9 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             if id_fondo:
                 where.append(f"c.id_fondo={id_fondo}")
             sql = """
-                SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo, c.detalle, c.importe, c.cod_cuenta
+                SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
+                       c.detalle, c.importe, c.cod_cuenta,
+                       c.confirmado
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
                 LEFT JOIN fondos f ON c.id_fondo = f.id
@@ -155,6 +157,61 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             sql += " ORDER BY c.fecha DESC LIMIT 500"
             cur.execute(sql)
             return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/vencimientos")
+def get_vencimientos():
+    """Movimientos proyectados (confirmado=false) con fecha <= hoy"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
+                       c.detalle, c.importe
+                FROM cashflow c
+                LEFT JOIN titulares t ON c.id_titular = t.id
+                LEFT JOIN fondos f ON c.id_fondo = f.id
+                WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
+                ORDER BY c.fecha ASC
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+class ConfirmarPagoIn(BaseModel):
+    fecha: Optional[str] = None
+
+@app.post("/vencimientos/{id}/confirmar")
+def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
+    """Confirma un movimiento proyectado — lo marca como real"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(body.fecha) if body and body.fecha else date.today()
+            cur.execute("""
+                UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s
+            """, (fecha, fecha.month, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+class ReprogramarIn(BaseModel):
+    fecha: str
+
+@app.post("/vencimientos/{id}/reprogramar")
+def reprogramar_vencimiento(id: int, body: ReprogramarIn):
+    """Reprograma un movimiento proyectado a nueva fecha"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(body.fecha)
+            cur.execute("""
+                UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s
+            """, (fecha, fecha.month, id))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -173,8 +230,8 @@ def crear_movimiento(m: MovimientoIn):
         with conn.cursor() as cur:
             fecha = date.fromisoformat(m.fecha)
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, true)
             """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo))
         conn.commit()
         return {"ok": True}
@@ -226,6 +283,8 @@ class ComprobanteIn(BaseModel):
     numero_comprobante: str
     descripcion: str
     importe: float
+    id_fondo: Optional[int] = None
+    fecha_vencimiento: Optional[str] = None  # si el frontend ya la calculó o la pidió al usuario
 
 @app.post("/operaciones")
 def crear_comprobante(c: ComprobanteIn):
@@ -233,12 +292,60 @@ def crear_comprobante(c: ComprobanteIn):
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
+
+            # 1. Guardar en operaciones
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (fecha, c.id_titular, c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
-        conn.commit()
-        return {"ok": True}
+            id_operacion = cur.fetchone()["id"]
+
+            # 2. Leer plazo del titular si no se pasó fecha_vencimiento
+            plazo = None
+            if not c.fecha_vencimiento:
+                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (c.id_titular,))
+                row = cur.fetchone()
+                if row and row["plazo_pago"] and row["plazo_pago"] > 0:
+                    plazo = row["plazo_pago"]
+
+            # 3. Si hay fecha de vencimiento (pasada o calculada), crear cashflow proyectado
+            if c.fecha_vencimiento or plazo:
+                if c.fecha_vencimiento:
+                    fecha_vto = date.fromisoformat(c.fecha_vencimiento)
+                else:
+                    fecha_vto = fecha + timedelta(days=plazo)
+
+                id_fondo = c.id_fondo
+                if not id_fondo:
+                    # Usar fondo_def del titular si existe
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (c.id_titular,))
+                    r = cur.fetchone()
+                    if r and r["fondo_def"]:
+                        id_fondo = r["fondo_def"]
+
+                if id_fondo:
+                    cur.execute("""
+                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                    """, (fecha_vto.month, fecha_vto, c.id_titular, c.descripcion, -abs(c.importe), id_fondo, id_operacion))
+
+                conn.commit()
+                return {
+                    "ok": True,
+                    "id_operacion": id_operacion,
+                    "proyectado": True,
+                    "fecha_vencimiento": str(fecha_vto) if (c.fecha_vencimiento or plazo) else None
+                }
+            else:
+                # Sin plazo y sin fecha_vencimiento — avisar al frontend para que pregunte
+                conn.commit()
+                return {
+                    "ok": True,
+                    "id_operacion": id_operacion,
+                    "proyectado": False,
+                    "sin_plazo": True
+                }
     finally:
         conn.close()
 
@@ -289,8 +396,8 @@ def registrar_pago(p: PagoIn):
 
             fecha = date.fromisoformat(p.fecha)
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, true)
                 RETURNING id
             """, (fecha.month, fecha, p.id_titular, p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
             id_pago = cur.fetchone()["id"]
