@@ -154,7 +154,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             """
             if where:
                 sql += " WHERE " + " AND ".join(where)
-            sql += " ORDER BY c.fecha DESC, c.confirmado ASC LIMIT 500"
+            sql += " ORDER BY c.fecha ASC LIMIT 500"
             cur.execute(sql)
             return cur.fetchall()
     finally:
