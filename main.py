@@ -130,7 +130,7 @@ def crear_titular(t: TitularIn):
         conn.close()
 
 @app.put("/titulares/{id}")
-def actualizar_titular(id: int, t: TitularIn):
+def actualizar_titular(id: str, t: TitularIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
