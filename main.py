@@ -52,7 +52,7 @@ def get_fondos():
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.slot IS NOT NULL
                 GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev
-                ORDER BY f.slot
+                ORDER BY f.orden
             """)
             return cur.fetchall()
     finally:
