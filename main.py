@@ -53,7 +53,8 @@ def get_fondos():
                 WHERE f.activo = true
                 GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev
                 ORDER BY f.slot
-            """)            return cur.fetchall()
+            """)
+            return cur.fetchall()
     finally:
         conn.close()
 
@@ -177,7 +178,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
                 where.append(f"c.id_fondo={id_fondo}")
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
-                       c.detalle, c.importe, c.cod_cuenta,
+                       c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
                        c.confirmado
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
