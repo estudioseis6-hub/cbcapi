@@ -555,6 +555,7 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
             reglas = cur.fetchall()
 
         resultados = []
+        vistos = set()   # (proveedor, numero) ya vistos en este mismo lote
         for archivo in archivos:
             contenido = await archivo.read()
             suf = os.path.splitext(archivo.filename or "")[1] or ".pdf"
@@ -589,7 +590,16 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
 
             items = _imputar_items(datos.get("items", []), id_titular, reglas)
 
-            if duplicado:
+            # Duplicado dentro del mismo lote: mismo proveedor + mismo numero.
+            # Se identifica el proveedor por CUIT si lo hay, si no por razon social.
+            num_norm = _solo_digitos(numero)
+            proveedor_key = _solo_digitos(cab.get("cuit")) or _norm(cab.get("razon_social"))
+            clave_lote = (proveedor_key, num_norm)
+            dup_en_lote = bool(num_norm) and clave_lote in vistos
+            if num_norm:
+                vistos.add(clave_lote)
+
+            if duplicado or dup_en_lote:
                 estado = "DUPLICADO"
             elif id_titular is None:
                 estado = "FALTA_TITULAR"
@@ -711,5 +721,111 @@ def eliminar_operacion(id: int):
             cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+# --- Guardar una factura leida por la IA (Fase 5a) --------------------------
+# Crea la operacion en cuenta corriente (con su proyeccion de vencimiento, igual
+# que la carga manual), guarda el detalle de productos en operaciones_items y
+# alimenta la memoria de imputacion. NO imputa el costo devengado en el balance
+# (eso es la fase 5b, pendiente de definir el plan de cuentas con signos).
+
+class ItemFacturaIn(BaseModel):
+    producto: Optional[str] = None
+    cantidad: Optional[float] = None
+    precio_unitario: Optional[float] = None
+    total_linea: Optional[float] = None
+    cod_cuenta: Optional[str] = None
+
+class FacturaGuardarIn(BaseModel):
+    fecha: str
+    id_titular: str
+    id_tipo_comprobante: Optional[int] = None
+    numero_comprobante: str = ""
+    descripcion: str = ""
+    importe: float
+    id_fondo: Optional[int] = None
+    fecha_vencimiento: Optional[str] = None
+    items: list[ItemFacturaIn] = []
+
+@app.post("/facturas/guardar")
+def guardar_factura(c: FacturaGuardarIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(c.fecha)
+            id_tipo = c.id_tipo_comprobante or 999     # 'Varios' si no se mapeo
+            id_titular = str(c.id_titular)
+
+            # 0) Guarda anti-duplicado: mismo proveedor + mismo numero (punto de
+            #    venta + numero van juntos en numero_comprobante). Si ya existe,
+            #    se rechaza la carga (no se inserta nada).
+            num_norm = _solo_digitos(c.numero_comprobante)
+            if num_norm:
+                cur.execute("""
+                    SELECT id FROM operaciones
+                    WHERE id_titular = %s
+                      AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
+                    LIMIT 1
+                """, (id_titular, num_norm))
+                existe = cur.fetchone()
+                if existe:
+                    return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
+
+            # 1) Operacion (idéntico al POST /operaciones manual)
+            cur.execute("""
+                INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (fecha, id_titular, id_tipo, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
+            id_operacion = cur.fetchone()["id"]
+
+            # 2) Proyeccion de vencimiento (igual que el flujo manual; sin cod_cuenta,
+            #    asi NO afecta el balance — solo Tesoreria como pago proyectado)
+            plazo = None
+            if not c.fecha_vencimiento:
+                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (id_titular,))
+                row = cur.fetchone()
+                if row and row["plazo_pago"] and row["plazo_pago"] > 0:
+                    plazo = row["plazo_pago"]
+            fecha_vto = None
+            if c.fecha_vencimiento or plazo:
+                fecha_vto = date.fromisoformat(c.fecha_vencimiento) if c.fecha_vencimiento else fecha + timedelta(days=plazo)
+                id_fondo = c.id_fondo
+                if not id_fondo:
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (id_titular,))
+                    r = cur.fetchone()
+                    if r and r["fondo_def"]:
+                        id_fondo = r["fondo_def"]
+                if id_fondo:
+                    cur.execute("""
+                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                    """, (fecha_vto.month, fecha_vto, id_titular, c.descripcion, -abs(c.importe), id_fondo, id_operacion))
+
+            # 3) Detalle de productos
+            for it in c.items:
+                cur.execute("""
+                    INSERT INTO operaciones_items (id_operacion, producto, cantidad, precio_unitario, total_linea, cod_cuenta)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (id_operacion, it.producto, it.cantidad, it.precio_unitario, it.total_linea, it.cod_cuenta))
+
+                # 4) Memoria de imputacion (solo si el producto ya tiene cuenta)
+                if it.cod_cuenta and it.producto:
+                    cur.execute("""
+                        INSERT INTO imputacion_producto (patron_producto, id_titular, cod_cuenta)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (lower(patron_producto), COALESCE(id_titular, ''))
+                        DO UPDATE SET cod_cuenta = EXCLUDED.cod_cuenta, creado_en = now()
+                    """, (it.producto, id_titular, it.cod_cuenta))
+
+        conn.commit()
+        return {
+            "ok": True,
+            "id_operacion": id_operacion,
+            "items_guardados": len(c.items),
+            "fecha_vencimiento": str(fecha_vto) if fecha_vto else None,
+        }
     finally:
         conn.close()

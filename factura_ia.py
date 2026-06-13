@@ -9,6 +9,7 @@ main.py:
     datos = analizar(ruta_archivo, model)   # -> {"cabecera": {...}, "items": [...]}
 """
 import os
+import re
 import json
 import time
 import google.generativeai as genai
@@ -39,7 +40,25 @@ def configurar(api_key=None):
     if not api_key:
         raise RuntimeError("Falta GEMINI_API_KEY (variable de entorno).")
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel(MODELO)
+    # response_mime_type fuerza a Gemini a devolver SIEMPRE JSON valido.
+    return genai.GenerativeModel(
+        MODELO,
+        generation_config={"response_mime_type": "application/json"},
+    )
+
+
+def _parsear_json(texto):
+    """Parsea el JSON de la IA tolerando imperfecciones (fences, comas colgantes)."""
+    t = texto.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        # Recortar al objeto { ... } y quitar comas colgantes antes de } o ]
+        ini, fin = t.find("{"), t.rfind("}")
+        if ini != -1 and fin != -1 and fin > ini:
+            t = t[ini:fin + 1]
+        t = re.sub(r",(\s*[}\]])", r"\1", t)
+        return json.loads(t)
 
 
 def analizar(ruta_archivo, model):
@@ -72,8 +91,7 @@ def analizar(ruta_archivo, model):
                     imagen = imagen.convert("RGB")
                 response = model.generate_content([PROMPT, imagen])
 
-            texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(texto_limpio)
+            return _parsear_json(response.text)
 
         except Exception as e:
             error_str = str(e).lower()
