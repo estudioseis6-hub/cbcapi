@@ -451,6 +451,28 @@ def _norm(texto):
     t = re.sub(r"[\"'“”«»]", " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
+def _norm_fuerte(texto):
+    # como _norm pero deja solo alfanumerico (sin espacios ni puntuacion):
+    # "FRIGORIFICO H T S.R.L" y "FRIGORIFICO HT S.R.L" -> "frigorificohtsrl"
+    return re.sub(r"[^a-z0-9]", "", _norm(texto))
+
+def _sugerir_titulares(razon_social, titulares, limite=5):
+    """Titulares ya cargados con nombre parecido (para no crear duplicados)."""
+    objetivo = _norm_fuerte(razon_social)
+    if len(objetivo) < 4:
+        return []
+    out = []
+    for t in titulares:
+        for campo in (t.get("nombre"), t.get("razon_social")):
+            nm = _norm_fuerte(campo)
+            if nm and (nm == objetivo or (len(nm) >= 5 and (nm in objetivo or objetivo in nm))):
+                out.append({"id": t["id"], "nombre": t["nombre"],
+                            "cuit": t.get("cuit_norm"), "plazo_pago": t["plazo_pago"]})
+                break
+        if len(out) >= limite:
+            break
+    return out
+
 def _match_titular(cuit, titulares):
     """Busca un titular cuyo CUIT (solo digitos) coincida. None si no hay."""
     cuit_norm = _solo_digitos(cuit)
@@ -576,24 +598,28 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
             id_titular = titular["id"] if titular else None
             id_tipo = _match_tipo(cab.get("tipo_comprobante"), tipos)
             numero = str(cab.get("numero_comprobante", "") or "")
+            num_norm = _solo_digitos(numero)
+            sugerencias = _sugerir_titulares(cab.get("razon_social"), titulares) if id_titular is None else []
 
+            # Duplicado contra la base: contra el titular matcheado o, si no
+            # matcheo (vino sin CUIT), contra los titulares de nombre parecido.
             duplicado = False
-            if id_titular and numero:
+            candidatos = [id_titular] if id_titular else [s["id"] for s in sugerencias]
+            if num_norm and candidatos:
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT 1 FROM operaciones
-                        WHERE id_titular = %s
+                        WHERE id_titular = ANY(%s)
                           AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
                         LIMIT 1
-                    """, (id_titular, _solo_digitos(numero)))
+                    """, (candidatos, num_norm))
                     duplicado = cur.fetchone() is not None
 
             items = _imputar_items(datos.get("items", []), id_titular, reglas)
 
             # Duplicado dentro del mismo lote: mismo proveedor + mismo numero.
-            # Se identifica el proveedor por CUIT si lo hay, si no por razon social.
-            num_norm = _solo_digitos(numero)
-            proveedor_key = _solo_digitos(cab.get("cuit")) or _norm(cab.get("razon_social"))
+            # Proveedor por CUIT si lo hay, si no por nombre normalizado fuerte.
+            proveedor_key = _solo_digitos(cab.get("cuit")) or _norm_fuerte(cab.get("razon_social"))
             clave_lote = (proveedor_key, num_norm)
             dup_en_lote = bool(num_norm) and clave_lote in vistos
             if num_norm:
@@ -619,6 +645,7 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
                 "id_titular": id_titular,
                 "titular_nombre": titular["nombre"] if titular else None,
                 "plazo_pago": titular["plazo_pago"] if titular else None,
+                "sugerencias": sugerencias,
                 "items": items,
             })
         return resultados
