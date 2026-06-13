@@ -846,3 +846,49 @@ def guardar_factura(c: FacturaGuardarIn):
         }
     finally:
         conn.close()
+        @app.get("/proyeccion_alerta")
+def get_proyeccion_alerta():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Saldo actual en pesos (confirmado = true AND fecha <= hoy)
+            cur.execute("""
+                SELECT COALESCE(SUM(f.saldo_inicial), 0) +
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0)
+                AS saldo_actual
+                FROM fondos f
+                LEFT JOIN cashflow c ON c.id_fondo = f.id
+                WHERE f.slot IS NOT NULL AND f.activo = true AND f.moneda = 'ARS'
+            """)
+            saldo_actual = float(cur.fetchone()["saldo_actual"] or 0)
+
+            # Movimientos futuros en pesos agrupados por fecha
+            cur.execute("""
+                SELECT c.fecha, SUM(c.importe) as total
+                FROM cashflow c
+                JOIN fondos f ON c.id_fondo = f.id
+                WHERE c.fecha > CURRENT_DATE
+                  AND f.moneda = 'ARS'
+                  AND f.slot IS NOT NULL
+                GROUP BY c.fecha
+                ORDER BY c.fecha ASC
+            """)
+            movimientos = cur.fetchall()
+
+        saldo = saldo_actual
+        primer_rojo = None
+        for m in movimientos:
+            saldo += float(m["total"])
+            if saldo < 0 and primer_rojo is None:
+                primer_rojo = {
+                    "fecha": str(m["fecha"]),
+                    "saldo": round(saldo, 1)
+                }
+                break
+
+        return {
+            "saldo_actual": round(saldo_actual, 1),
+            "primer_rojo": primer_rojo
+        }
+    finally:
+        conn.close()
