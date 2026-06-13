@@ -197,6 +197,15 @@ def get_vencimientos():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Rollover: mover vencidos anteriores a hoy
+            cur.execute("""
+                UPDATE cashflow 
+                SET fecha = CURRENT_DATE, mes = EXTRACT(MONTH FROM CURRENT_DATE)::integer
+                WHERE confirmado = false AND fecha < CURRENT_DATE
+            """)
+            movidos = cur.rowcount
+            conn.commit()
+            
             cur.execute("""
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe
@@ -206,7 +215,7 @@ def get_vencimientos():
                 WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
                 ORDER BY c.fecha ASC
             """)
-            return cur.fetchall()
+            return {"vencimientos": cur.fetchall(), "movidos": movidos}
     finally:
         conn.close()
 
