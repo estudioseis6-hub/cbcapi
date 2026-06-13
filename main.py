@@ -47,8 +47,8 @@ def get_fondos():
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
                        f.saldo_inicial, f.slot, f.abrev,
-                       COALESCE(SUM(CASE WHEN c.confirmado = true THEN c.importe ELSE 0 END), 0) AS movimientos,
-                       COALESCE(SUM(CASE WHEN c.confirmado = false AND c.fecha > CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS proyectado
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS movimientos,
+                       COALESCE(SUM(CASE WHEN c.fecha > CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS proyectado
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.slot IS NOT NULL
