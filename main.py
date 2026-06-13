@@ -46,14 +46,14 @@ def get_fondos():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
-                       f.saldo_inicial, COALESCE(SUM(c.importe),0) as movimientos
+                       f.saldo_inicial, f.slot, f.abrev,
+                       COALESCE(SUM(c.importe),0) as movimientos
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.activo = true
-                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial
-                ORDER BY f.id
-            """)
-            return cur.fetchall()
+                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev
+                ORDER BY f.slot
+            """)            return cur.fetchall()
     finally:
         conn.close()
 
