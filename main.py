@@ -30,7 +30,6 @@ def root():
 
 @app.get("/ping")
 def ping():
-    # Consulta liviana para mantener despierta la base de Neon (evita cold-start)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -47,12 +46,13 @@ def get_fondos():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
-                       f.saldo_inicial, COALESCE(SUM(c.importe),0) as movimientos
+                       f.saldo_inicial, f.slot, f.abrev,
+                       COALESCE(SUM(c.importe),0) as movimientos
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
-                WHERE f.activo = true
-                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial
-                ORDER BY f.id
+                WHERE f.slot IS NOT NULL
+                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev
+                ORDER BY f.orden
             """)
             return cur.fetchall()
     finally:
@@ -94,7 +94,10 @@ def get_titulares():
             cur.execute("""
                 SELECT id, nombre, nivel1,
                        COALESCE(tipo_titular, 'PROVEEDOR') tipo_titular,
-                       COALESCE(plazo_pago, 0) plazo_pago
+                       COALESCE(plazo_pago, 0) plazo_pago,
+                       cod1, cod2, cod3, cod4, cod5,
+                       fondo_def, razon_social, cuit, cond_fiscal,
+                       genera_cc, activo
                 FROM titulares
                 ORDER BY CASE WHEN nivel1='SISTEMA' THEN 0 ELSE 1 END, nombre
             """)
@@ -107,6 +110,17 @@ class TitularIn(BaseModel):
     nivel1: str
     tipo_titular: str
     plazo_pago: int
+    razon_social: Optional[str] = None
+    cuit: Optional[str] = None
+    cond_fiscal: Optional[str] = None
+    cod1: Optional[str] = None
+    cod2: Optional[str] = None
+    cod3: Optional[str] = None
+    cod4: Optional[str] = None
+    cod5: Optional[str] = None
+    fondo_def: Optional[str] = None
+    genera_cc: Optional[bool] = True
+    activo: Optional[bool] = True
 
 @app.post("/titulares")
 def crear_titular(t: TitularIn):
@@ -114,23 +128,29 @@ def crear_titular(t: TitularIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO titulares (nombre, nivel1, tipo_titular, plazo_pago)
-                VALUES (%s, %s, %s, %s)
-            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago))
+                INSERT INTO titulares (nombre, nivel1, tipo_titular, plazo_pago, razon_social, cuit, cond_fiscal, cod1, cod2, cod3, cod4, cod5, fondo_def, genera_cc, activo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago, t.razon_social, t.cuit, t.cond_fiscal, t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.fondo_def, t.genera_cc, t.activo))
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
 
 @app.put("/titulares/{id}")
-def actualizar_titular(id: int, t: TitularIn):
+def actualizar_titular(id: str, t: TitularIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE titulares SET nombre=%s, nivel1=%s, tipo_titular=%s, plazo_pago=%s
+                UPDATE titulares SET nombre=%s, nivel1=%s, tipo_titular=%s, plazo_pago=%s,
+                       razon_social=%s, cuit=%s, cond_fiscal=%s,
+                       cod1=%s, cod2=%s, cod3=%s, cod4=%s, cod5=%s,
+                       fondo_def=%s, genera_cc=%s, activo=%s
                 WHERE id=%s
-            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago, id))
+            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago,
+                  t.razon_social, t.cuit, t.cond_fiscal,
+                  t.cod1, t.cod2, t.cod3, t.cod4, t.cod5,
+                  t.fondo_def, t.genera_cc, t.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -158,7 +178,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
                 where.append(f"c.id_fondo={id_fondo}")
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
-                       c.detalle, c.importe, c.cod_cuenta,
+                       c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
                        c.confirmado
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
@@ -263,7 +283,6 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             where = []
             params = []
             if id_titular:
-                # id_titular en la base es texto (varchar); comparar como string
                 where.append("o.id_titular = %s")
                 params.append(str(id_titular))
             if estado == "IMPAGO":
@@ -302,7 +321,6 @@ def crear_comprobante(c: ComprobanteIn):
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
-
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -337,20 +355,10 @@ def crear_comprobante(c: ComprobanteIn):
                     """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(c.importe), id_fondo, id_operacion))
 
                 conn.commit()
-                return {
-                    "ok": True,
-                    "id_operacion": id_operacion,
-                    "proyectado": True,
-                    "fecha_vencimiento": str(fecha_vto)
-                }
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto)}
             else:
                 conn.commit()
-                return {
-                    "ok": True,
-                    "id_operacion": id_operacion,
-                    "proyectado": False,
-                    "sin_plazo": True
-                }
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": False, "sin_plazo": True}
     finally:
         conn.close()
 
@@ -359,7 +367,11 @@ def get_plan_cuentas():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT niv1_desc, niv2_desc, nombre, signo FROM plan_de_cuentas ORDER BY niv1,niv2,niv3,niv4,niv5")
+            cur.execute("""
+                SELECT niv1_desc, niv2_desc, nombre, signo, fondo
+                FROM plan_de_cuentas
+                ORDER BY niv1,niv2,niv3,niv4,niv5
+            """)
             return cur.fetchall()
     finally:
         conn.close()
@@ -398,7 +410,6 @@ def registrar_pago(p: PagoIn):
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
-
             fecha = date.fromisoformat(p.fecha)
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
@@ -406,9 +417,7 @@ def registrar_pago(p: PagoIn):
                 RETURNING id
             """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
             id_pago = cur.fetchone()["id"]
-
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
-
         conn.commit()
         return {"ok": True, "id_pago": id_pago, "total": total}
     finally:
@@ -669,5 +678,38 @@ def vincular_titular_factura(id: str, v: VincularTitularIn):
         if not row:
             return {"ok": False, "error": "Titular no encontrado"}
         return {"ok": True, "id": row["id"], "nombre": row["nombre"], "plazo_pago": row["plazo_pago"]}
+    finally:
+        conn.close()
+
+@app.delete("/titulares/{id}")
+def eliminar_titular(id: str):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM titulares WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/cashflow/{id}")
+def eliminar_cashflow(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/operaciones/{id}")
+def eliminar_operacion(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
