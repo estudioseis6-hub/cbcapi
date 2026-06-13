@@ -47,7 +47,8 @@ def get_fondos():
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
                        f.saldo_inicial, f.slot, f.abrev,
-                       COALESCE(SUM(c.importe),0) as movimientos
+                       COALESCE(SUM(CASE WHEN c.confirmado = true THEN c.importe ELSE 0 END), 0) AS movimientos,
+                       COALESCE(SUM(CASE WHEN c.confirmado = false AND c.fecha > CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS proyectado
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.slot IS NOT NULL
@@ -198,6 +199,13 @@ def get_vencimientos():
     try:
         with conn.cursor() as cur:
             cur.execute("""
+                UPDATE cashflow
+                SET fecha = CURRENT_DATE, mes = EXTRACT(MONTH FROM CURRENT_DATE)::integer
+                WHERE confirmado = false AND fecha < CURRENT_DATE
+            """)
+            movidos = cur.rowcount
+            conn.commit()
+            cur.execute("""
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe
                 FROM cashflow c
@@ -206,7 +214,7 @@ def get_vencimientos():
                 WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
                 ORDER BY c.fecha ASC
             """)
-            return cur.fetchall()
+            return {"vencimientos": cur.fetchall(), "movidos": movidos}
     finally:
         conn.close()
 
@@ -444,11 +452,10 @@ def _solo_digitos(texto):
     return re.sub(r"\D", "", str(texto or ""))
 
 def _norm(texto):
-    # minusculas, sin acentos, sin comillas, sin espacios de mas
     t = str(texto or "").strip().lower()
     t = unicodedata.normalize("NFKD", t)
     t = "".join(c for c in t if not unicodedata.combining(c))
-    t = re.sub(r"[\"'“”«»]", " ", t)
+    t = re.sub(r"[\"'""«»]", " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 def _norm_fuerte(texto):
@@ -474,7 +481,6 @@ def _sugerir_titulares(razon_social, titulares, limite=5):
     return out
 
 def _match_titular(cuit, titulares):
-    """Busca un titular cuyo CUIT (solo digitos) coincida. None si no hay."""
     cuit_norm = _solo_digitos(cuit)
     if not cuit_norm:
         return None
@@ -484,21 +490,18 @@ def _match_titular(cuit, titulares):
     return None
 
 def _match_tipo(descripcion, tipos):
-    """Mapea el tipo de comprobante (texto) al id de tipos_comprobante."""
     d = _norm(descripcion)
     if not d:
         return None
-    for t in tipos:                       # match exacto
+    for t in tipos:
         if _norm(t["descripcion"]) == d:
             return t["id"]
-    for t in tipos:                       # match parcial
+    for t in tipos:
         td = _norm(t["descripcion"])
         if td and (td in d or d in td):
             return t["id"]
-    # Heuristica para variantes de redaccion AFIP (ej: 'e-Factura de Venta "A"'):
-    # detectar la clase de documento y la letra, y buscar el nombre canonico.
     letra_m = re.search(r"\b([abcm])\b", d)
-    letra = letra_m.group(1) if letra_m else None  # ya viene en minuscula (norm)
+    letra = letra_m.group(1) if letra_m else None
     if "credito" in d:
         clase = "nota de credito"
     elif "debito" in d:
@@ -523,16 +526,15 @@ def _match_tipo(descripcion, tipos):
     return None
 
 def _imputar_items(items, id_titular, reglas):
-    """Asigna a cada item su cod_cuenta usando la memoria de imputacion."""
     salida = []
     for it in items or []:
         prod = _norm(it.get("producto"))
         cuenta = None
-        if id_titular:                    # 1) regla especifica del proveedor
+        if id_titular:
             for r in reglas:
                 if r["patron"] == prod and r["id_titular"] == str(id_titular):
                     cuenta = r["cod_cuenta"]; break
-        if cuenta is None:                # 2) regla general
+        if cuenta is None:
             for r in reglas:
                 if r["patron"] == prod and not r["id_titular"]:
                     cuenta = r["cod_cuenta"]; break
@@ -541,7 +543,7 @@ def _imputar_items(items, id_titular, reglas):
             "cantidad": it.get("cantidad"),
             "precio_unitario": it.get("precio_unitario"),
             "total_linea": it.get("total_linea"),
-            "cod_cuenta": cuenta,         # None -> el usuario la elige en la revision
+            "cod_cuenta": cuenta,
         })
     return salida
 
@@ -555,12 +557,6 @@ def _convertir_fecha_iso(fecha_str):
 
 @app.post("/facturas/analizar")
 async def analizar_facturas(archivos: list[UploadFile] = File(...)):
-    """
-    Recibe 1 o varias facturas (PDF/imagen), las procesa con FACTUR.IA (Gemini)
-    y devuelve los datos extraidos + mapeados: titular por CUIT, tipo de
-    comprobante e items con su cuenta pre-asignada por memoria.
-    NO escribe en la base: solo analiza y propone para que el usuario revise.
-    """
     model = _get_modelo_ia()
     conn = get_conn()
     try:
@@ -651,12 +647,6 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
         return resultados
     finally:
         conn.close()
-
-
-# --- Alta / vinculacion de titular desde la carga automatica ----------------
-# Cuando una factura no matchea por CUIT, el usuario puede crear un titular
-# nuevo (con los datos de la factura) o vincular el CUIT a un titular existente.
-# En ambos casos queda cargado el CUIT, asi las proximas facturas matchean solas.
 
 class TitularNuevoIn(BaseModel):
     nombre: str
