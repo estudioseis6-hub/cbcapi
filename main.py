@@ -50,7 +50,7 @@ def get_fondos():
                        COALESCE(SUM(c.importe),0) as movimientos
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
-                WHERE f.activo = true
+                WHERE f.slot IS NOT NULL
                 GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev
                 ORDER BY f.slot
             """)
@@ -355,20 +355,10 @@ def crear_comprobante(c: ComprobanteIn):
                     """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(c.importe), id_fondo, id_operacion))
 
                 conn.commit()
-                return {
-                    "ok": True,
-                    "id_operacion": id_operacion,
-                    "proyectado": True,
-                    "fecha_vencimiento": str(fecha_vto)
-                }
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto)}
             else:
                 conn.commit()
-                return {
-                    "ok": True,
-                    "id_operacion": id_operacion,
-                    "proyectado": False,
-                    "sin_plazo": True
-                }
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": False, "sin_plazo": True}
     finally:
         conn.close()
 
@@ -420,7 +410,6 @@ def registrar_pago(p: PagoIn):
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
-
             fecha = date.fromisoformat(p.fecha)
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
@@ -428,9 +417,7 @@ def registrar_pago(p: PagoIn):
                 RETURNING id
             """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
             id_pago = cur.fetchone()["id"]
-
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
-
         conn.commit()
         return {"ok": True, "id_pago": id_pago, "total": total}
     finally:
