@@ -605,3 +605,69 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
         return resultados
     finally:
         conn.close()
+
+
+# --- Alta / vinculacion de titular desde la carga automatica ----------------
+# Cuando una factura no matchea por CUIT, el usuario puede crear un titular
+# nuevo (con los datos de la factura) o vincular el CUIT a un titular existente.
+# En ambos casos queda cargado el CUIT, asi las proximas facturas matchean solas.
+
+class TitularNuevoIn(BaseModel):
+    nombre: str
+    cuit: str
+    razon_social: Optional[str] = None
+    plazo_pago: int
+    nivel1: str = "Proveedores"
+    tipo_titular: str = "PROVEEDOR"
+
+@app.post("/facturas/titular")
+def crear_titular_factura(t: TitularNuevoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO titulares (nombre, razon_social, cuit, nivel1, tipo_titular, plazo_pago, activo)
+                VALUES (%s, %s, %s, %s, %s, %s, true)
+                RETURNING id
+            """, (t.nombre, t.razon_social or t.nombre, _solo_digitos(t.cuit),
+                  t.nivel1, t.tipo_titular, t.plazo_pago))
+            nuevo_id = cur.fetchone()["id"]
+        conn.commit()
+        return {"ok": True, "id": nuevo_id, "nombre": t.nombre, "plazo_pago": t.plazo_pago}
+    finally:
+        conn.close()
+
+class VincularTitularIn(BaseModel):
+    cuit: str
+    razon_social: Optional[str] = None
+    plazo_pago: Optional[int] = None
+
+@app.post("/facturas/titular/{id}/vincular")
+def vincular_titular_factura(id: str, v: VincularTitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if v.plazo_pago is not None:
+                cur.execute("""
+                    UPDATE titulares
+                    SET cuit=%s,
+                        razon_social=COALESCE(NULLIF(razon_social,''), %s),
+                        plazo_pago=%s
+                    WHERE id=%s
+                    RETURNING id, nombre, plazo_pago
+                """, (_solo_digitos(v.cuit), v.razon_social, v.plazo_pago, id))
+            else:
+                cur.execute("""
+                    UPDATE titulares
+                    SET cuit=%s,
+                        razon_social=COALESCE(NULLIF(razon_social,''), %s)
+                    WHERE id=%s
+                    RETURNING id, nombre, plazo_pago
+                """, (_solo_digitos(v.cuit), v.razon_social, id))
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return {"ok": False, "error": "Titular no encontrado"}
+        return {"ok": True, "id": row["id"], "nombre": row["nombre"], "plazo_pago": row["plazo_pago"]}
+    finally:
+        conn.close()
