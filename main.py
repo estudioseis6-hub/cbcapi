@@ -459,12 +459,9 @@ def _norm(texto):
     return re.sub(r"\s+", " ", t).strip()
 
 def _norm_fuerte(texto):
-    # como _norm pero deja solo alfanumerico (sin espacios ni puntuacion):
-    # "FRIGORIFICO H T S.R.L" y "FRIGORIFICO HT S.R.L" -> "frigorificohtsrl"
     return re.sub(r"[^a-z0-9]", "", _norm(texto))
 
 def _sugerir_titulares(razon_social, titulares, limite=5):
-    """Titulares ya cargados con nombre parecido (para no crear duplicados)."""
     objetivo = _norm_fuerte(razon_social)
     if len(objetivo) < 4:
         return []
@@ -573,7 +570,7 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
             reglas = cur.fetchall()
 
         resultados = []
-        vistos = set()   # (proveedor, numero) ya vistos en este mismo lote
+        vistos = set()
         for archivo in archivos:
             contenido = await archivo.read()
             suf = os.path.splitext(archivo.filename or "")[1] or ".pdf"
@@ -597,8 +594,6 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
             num_norm = _solo_digitos(numero)
             sugerencias = _sugerir_titulares(cab.get("razon_social"), titulares) if id_titular is None else []
 
-            # Duplicado contra la base: contra el titular matcheado o, si no
-            # matcheo (vino sin CUIT), contra los titulares de nombre parecido.
             duplicado = False
             candidatos = [id_titular] if id_titular else [s["id"] for s in sugerencias]
             if num_norm and candidatos:
@@ -613,8 +608,6 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
 
             items = _imputar_items(datos.get("items", []), id_titular, reglas)
 
-            # Duplicado dentro del mismo lote: mismo proveedor + mismo numero.
-            # Proveedor por CUIT si lo hay, si no por nombre normalizado fuerte.
             proveedor_key = _solo_digitos(cab.get("cuit")) or _norm_fuerte(cab.get("razon_social"))
             clave_lote = (proveedor_key, num_norm)
             dup_en_lote = bool(num_norm) and clave_lote in vistos
@@ -647,6 +640,7 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
         return resultados
     finally:
         conn.close()
+
 
 class TitularNuevoIn(BaseModel):
     nombre: str
@@ -708,6 +702,7 @@ def vincular_titular_factura(id: str, v: VincularTitularIn):
     finally:
         conn.close()
 
+
 @app.delete("/titulares/{id}")
 def eliminar_titular(id: str):
     conn = get_conn()
@@ -742,12 +737,6 @@ def eliminar_operacion(id: int):
         conn.close()
 
 
-# --- Guardar una factura leida por la IA (Fase 5a) --------------------------
-# Crea la operacion en cuenta corriente (con su proyeccion de vencimiento, igual
-# que la carga manual), guarda el detalle de productos en operaciones_items y
-# alimenta la memoria de imputacion. NO imputa el costo devengado en el balance
-# (eso es la fase 5b, pendiente de definir el plan de cuentas con signos).
-
 class ItemFacturaIn(BaseModel):
     producto: Optional[str] = None
     cantidad: Optional[float] = None
@@ -772,12 +761,9 @@ def guardar_factura(c: FacturaGuardarIn):
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
-            id_tipo = c.id_tipo_comprobante or 999     # 'Varios' si no se mapeo
+            id_tipo = c.id_tipo_comprobante or 999
             id_titular = str(c.id_titular)
 
-            # 0) Guarda anti-duplicado: mismo proveedor + mismo numero (punto de
-            #    venta + numero van juntos en numero_comprobante). Si ya existe,
-            #    se rechaza la carga (no se inserta nada).
             num_norm = _solo_digitos(c.numero_comprobante)
             if num_norm:
                 cur.execute("""
@@ -790,7 +776,6 @@ def guardar_factura(c: FacturaGuardarIn):
                 if existe:
                     return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
 
-            # 1) Operacion (idéntico al POST /operaciones manual)
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -798,8 +783,6 @@ def guardar_factura(c: FacturaGuardarIn):
             """, (fecha, id_titular, id_tipo, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
             id_operacion = cur.fetchone()["id"]
 
-            # 2) Proyeccion de vencimiento (igual que el flujo manual; sin cod_cuenta,
-            #    asi NO afecta el balance — solo Tesoreria como pago proyectado)
             plazo = None
             if not c.fecha_vencimiento:
                 cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (id_titular,))
@@ -821,14 +804,12 @@ def guardar_factura(c: FacturaGuardarIn):
                         VALUES (%s, %s, %s, %s, %s, %s, %s, false)
                     """, (fecha_vto.month, fecha_vto, id_titular, c.descripcion, -abs(c.importe), id_fondo, id_operacion))
 
-            # 3) Detalle de productos
             for it in c.items:
                 cur.execute("""
                     INSERT INTO operaciones_items (id_operacion, producto, cantidad, precio_unitario, total_linea, cod_cuenta)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (id_operacion, it.producto, it.cantidad, it.precio_unitario, it.total_linea, it.cod_cuenta))
 
-                # 4) Memoria de imputacion (solo si el producto ya tiene cuenta)
                 if it.cod_cuenta and it.producto:
                     cur.execute("""
                         INSERT INTO imputacion_producto (patron_producto, id_titular, cod_cuenta)
@@ -846,12 +827,13 @@ def guardar_factura(c: FacturaGuardarIn):
         }
     finally:
         conn.close()
-        @app.get("/proyeccion_alerta")
+
+
+@app.get("/proyeccion_alerta")
 def get_proyeccion_alerta():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Saldo actual en pesos (confirmado = true AND fecha <= hoy)
             cur.execute("""
                 SELECT COALESCE(SUM(f.saldo_inicial), 0) +
                        COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0)
@@ -862,7 +844,6 @@ def get_proyeccion_alerta():
             """)
             saldo_actual = float(cur.fetchone()["saldo_actual"] or 0)
 
-            # Movimientos futuros en pesos agrupados por fecha
             cur.execute("""
                 SELECT c.fecha, SUM(c.importe) as total
                 FROM cashflow c
