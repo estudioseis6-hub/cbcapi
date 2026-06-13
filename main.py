@@ -423,6 +423,264 @@ def registrar_pago(p: PagoIn):
     finally:
         conn.close()
 
+# ==========================================
+# CARGA AUTOMATICA DE COMPROBANTES (FACTUR.IA)
+# ==========================================
+import re
+import tempfile
+import unicodedata
+from datetime import datetime
+from fastapi import UploadFile, File
+import factura_ia
+
+_modelo_ia = None
+def _get_modelo_ia():
+    global _modelo_ia
+    if _modelo_ia is None:
+        _modelo_ia = factura_ia.configurar()
+    return _modelo_ia
+
+def _solo_digitos(texto):
+    return re.sub(r"\D", "", str(texto or ""))
+
+def _norm(texto):
+    # minusculas, sin acentos, sin comillas, sin espacios de mas
+    t = str(texto or "").strip().lower()
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r"[\"'“”«»]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+def _match_titular(cuit, titulares):
+    """Busca un titular cuyo CUIT (solo digitos) coincida. None si no hay."""
+    cuit_norm = _solo_digitos(cuit)
+    if not cuit_norm:
+        return None
+    for t in titulares:
+        if t["cuit_norm"] and t["cuit_norm"] == cuit_norm:
+            return t
+    return None
+
+def _match_tipo(descripcion, tipos):
+    """Mapea el tipo de comprobante (texto) al id de tipos_comprobante."""
+    d = _norm(descripcion)
+    if not d:
+        return None
+    for t in tipos:                       # match exacto
+        if _norm(t["descripcion"]) == d:
+            return t["id"]
+    for t in tipos:                       # match parcial
+        td = _norm(t["descripcion"])
+        if td and (td in d or d in td):
+            return t["id"]
+    # Heuristica para variantes de redaccion AFIP (ej: 'e-Factura de Venta "A"'):
+    # detectar la clase de documento y la letra, y buscar el nombre canonico.
+    letra_m = re.search(r"\b([abcm])\b", d)
+    letra = letra_m.group(1) if letra_m else None  # ya viene en minuscula (norm)
+    if "credito" in d:
+        clase = "nota de credito"
+    elif "debito" in d:
+        clase = "nota de debito"
+    elif "recibo" in d:
+        clase = "recibo"
+    elif "factura" in d:
+        clase = "factura"
+    elif "tique" in d or "ticket" in d:
+        clase = "tique"
+    elif "remito" in d:
+        clase = "remito"
+    else:
+        return None
+    objetivo = f"{clase} {letra}" if letra else clase
+    for t in tipos:
+        if _norm(t["descripcion"]) == objetivo:
+            return t["id"]
+    for t in tipos:
+        if _norm(t["descripcion"]).startswith(clase):
+            return t["id"]
+    return None
+
+def _imputar_items(items, id_titular, reglas):
+    """Asigna a cada item su cod_cuenta usando la memoria de imputacion."""
+    salida = []
+    for it in items or []:
+        prod = _norm(it.get("producto"))
+        cuenta = None
+        if id_titular:                    # 1) regla especifica del proveedor
+            for r in reglas:
+                if r["patron"] == prod and r["id_titular"] == str(id_titular):
+                    cuenta = r["cod_cuenta"]; break
+        if cuenta is None:                # 2) regla general
+            for r in reglas:
+                if r["patron"] == prod and not r["id_titular"]:
+                    cuenta = r["cod_cuenta"]; break
+        salida.append({
+            "producto": it.get("producto"),
+            "cantidad": it.get("cantidad"),
+            "precio_unitario": it.get("precio_unitario"),
+            "total_linea": it.get("total_linea"),
+            "cod_cuenta": cuenta,         # None -> el usuario la elige en la revision
+        })
+    return salida
+
+def _convertir_fecha_iso(fecha_str):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(str(fecha_str).strip(), fmt).date().isoformat()
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+@app.post("/facturas/analizar")
+async def analizar_facturas(archivos: list[UploadFile] = File(...)):
+    """
+    Recibe 1 o varias facturas (PDF/imagen), las procesa con FACTUR.IA (Gemini)
+    y devuelve los datos extraidos + mapeados: titular por CUIT, tipo de
+    comprobante e items con su cuenta pre-asignada por memoria.
+    NO escribe en la base: solo analiza y propone para que el usuario revise.
+    """
+    model = _get_modelo_ia()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, regexp_replace(COALESCE(cuit,''), '\\D', '', 'g') AS cuit_norm,
+                       nombre, razon_social, plazo_pago, fondo_def
+                FROM titulares
+            """)
+            titulares = cur.fetchall()
+            cur.execute("SELECT id, descripcion FROM tipos_comprobante WHERE activo = true")
+            tipos = cur.fetchall()
+            cur.execute("SELECT lower(patron_producto) AS patron, id_titular, cod_cuenta FROM imputacion_producto")
+            reglas = cur.fetchall()
+
+        resultados = []
+        for archivo in archivos:
+            contenido = await archivo.read()
+            suf = os.path.splitext(archivo.filename or "")[1] or ".pdf"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suf) as tmp:
+                tmp.write(contenido)
+                ruta_tmp = tmp.name
+            try:
+                datos = factura_ia.analizar(ruta_tmp, model)
+            except Exception as e:
+                resultados.append({"archivo": archivo.filename, "estado": "ERROR_LECTURA", "error": str(e)[:200]})
+                continue
+            finally:
+                try: os.unlink(ruta_tmp)
+                except Exception: pass
+
+            cab = datos.get("cabecera", {}) or {}
+            titular = _match_titular(cab.get("cuit"), titulares)
+            id_titular = titular["id"] if titular else None
+            id_tipo = _match_tipo(cab.get("tipo_comprobante"), tipos)
+            numero = str(cab.get("numero_comprobante", "") or "")
+
+            duplicado = False
+            if id_titular and numero:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT 1 FROM operaciones
+                        WHERE id_titular = %s
+                          AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
+                        LIMIT 1
+                    """, (id_titular, _solo_digitos(numero)))
+                    duplicado = cur.fetchone() is not None
+
+            items = _imputar_items(datos.get("items", []), id_titular, reglas)
+
+            if duplicado:
+                estado = "DUPLICADO"
+            elif id_titular is None:
+                estado = "FALTA_TITULAR"
+            else:
+                estado = "LISTO"
+
+            resultados.append({
+                "archivo": archivo.filename,
+                "estado": estado,
+                "razon_social": cab.get("razon_social"),
+                "cuit": cab.get("cuit"),
+                "fecha": _convertir_fecha_iso(cab.get("fecha")),
+                "tipo_comprobante": cab.get("tipo_comprobante"),
+                "id_tipo_comprobante": id_tipo,
+                "numero_comprobante": numero,
+                "total": cab.get("total"),
+                "id_titular": id_titular,
+                "titular_nombre": titular["nombre"] if titular else None,
+                "plazo_pago": titular["plazo_pago"] if titular else None,
+                "items": items,
+            })
+        return resultados
+    finally:
+        conn.close()
+
+
+# --- Alta / vinculacion de titular desde la carga automatica ----------------
+# Cuando una factura no matchea por CUIT, el usuario puede crear un titular
+# nuevo (con los datos de la factura) o vincular el CUIT a un titular existente.
+# En ambos casos queda cargado el CUIT, asi las proximas facturas matchean solas.
+
+class TitularNuevoIn(BaseModel):
+    nombre: str
+    cuit: str
+    razon_social: Optional[str] = None
+    plazo_pago: int
+    nivel1: str = "Proveedores"
+    tipo_titular: str = "PROVEEDOR"
+
+@app.post("/facturas/titular")
+def crear_titular_factura(t: TitularNuevoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO titulares (nombre, razon_social, cuit, nivel1, tipo_titular, plazo_pago, activo)
+                VALUES (%s, %s, %s, %s, %s, %s, true)
+                RETURNING id
+            """, (t.nombre, t.razon_social or t.nombre, _solo_digitos(t.cuit),
+                  t.nivel1, t.tipo_titular, t.plazo_pago))
+            nuevo_id = cur.fetchone()["id"]
+        conn.commit()
+        return {"ok": True, "id": nuevo_id, "nombre": t.nombre, "plazo_pago": t.plazo_pago}
+    finally:
+        conn.close()
+
+class VincularTitularIn(BaseModel):
+    cuit: str
+    razon_social: Optional[str] = None
+    plazo_pago: Optional[int] = None
+
+@app.post("/facturas/titular/{id}/vincular")
+def vincular_titular_factura(id: str, v: VincularTitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if v.plazo_pago is not None:
+                cur.execute("""
+                    UPDATE titulares
+                    SET cuit=%s,
+                        razon_social=COALESCE(NULLIF(razon_social,''), %s),
+                        plazo_pago=%s
+                    WHERE id=%s
+                    RETURNING id, nombre, plazo_pago
+                """, (_solo_digitos(v.cuit), v.razon_social, v.plazo_pago, id))
+            else:
+                cur.execute("""
+                    UPDATE titulares
+                    SET cuit=%s,
+                        razon_social=COALESCE(NULLIF(razon_social,''), %s)
+                    WHERE id=%s
+                    RETURNING id, nombre, plazo_pago
+                """, (_solo_digitos(v.cuit), v.razon_social, id))
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return {"ok": False, "error": "Titular no encontrado"}
+        return {"ok": True, "id": row["id"], "nombre": row["nombre"], "plazo_pago": row["plazo_pago"]}
+    finally:
+        conn.close()
+
 @app.delete("/titulares/{id}")
 def eliminar_titular(id: str):
     conn = get_conn()
