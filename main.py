@@ -8,6 +8,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import date, timedelta
 from typing import Optional
 from pydantic import BaseModel
+from collections import defaultdict
 
 app = FastAPI()
 
@@ -835,41 +836,64 @@ def get_proyeccion_alerta():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT COALESCE(SUM(f.saldo_inicial), 0) +
+                SELECT f.id, f.nombre, f.abrev, f.slot, f.moneda,
+                       f.saldo_inicial +
                        COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0)
-                AS saldo_actual
+                       AS saldo_actual
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.slot IS NOT NULL AND f.activo = true AND f.moneda = 'ARS'
+                GROUP BY f.id, f.nombre, f.abrev, f.slot, f.moneda, f.saldo_inicial
+                ORDER BY f.orden
             """)
-            saldo_actual = float(cur.fetchone()["saldo_actual"] or 0)
+            fondos = cur.fetchall()
 
             cur.execute("""
-                SELECT c.fecha, SUM(c.importe) as total
+                SELECT c.id_fondo, c.fecha, SUM(c.importe) as total
                 FROM cashflow c
                 JOIN fondos f ON c.id_fondo = f.id
                 WHERE c.fecha > CURRENT_DATE
                   AND f.moneda = 'ARS'
                   AND f.slot IS NOT NULL
-                GROUP BY c.fecha
+                GROUP BY c.id_fondo, c.fecha
                 ORDER BY c.fecha ASC
             """)
             movimientos = cur.fetchall()
 
-        saldo = saldo_actual
-        primer_rojo = None
+        mov_por_fondo = defaultdict(list)
         for m in movimientos:
-            saldo += float(m["total"])
-            if saldo < 0 and primer_rojo is None:
-                primer_rojo = {
-                    "fecha": str(m["fecha"]),
-                    "saldo": round(saldo, 1)
+            mov_por_fondo[m["id_fondo"]].append(m)
+
+        primer_rojo_por_fondo = {}
+        for f in fondos:
+            saldo = float(f["saldo_actual"])
+            for m in mov_por_fondo[f["id"]]:
+                saldo += float(m["total"])
+                if saldo < 0:
+                    primer_rojo_por_fondo[f["id"]] = {
+                        "fecha": str(m["fecha"]),
+                        "saldo": round(saldo, 1)
+                    }
+                    break
+
+        saldo_total = sum(float(f["saldo_actual"]) for f in fondos)
+        todas_fechas = sorted(set(str(m["fecha"]) for m in movimientos))
+        primer_rojo_total = None
+        for fecha in todas_fechas:
+            for f in fondos:
+                for m in mov_por_fondo[f["id"]]:
+                    if str(m["fecha"]) == fecha:
+                        saldo_total += float(m["total"])
+            if saldo_total < 0 and primer_rojo_total is None:
+                primer_rojo_total = {
+                    "fecha": fecha,
+                    "saldo": round(saldo_total, 1)
                 }
                 break
 
         return {
-            "saldo_actual": round(saldo_actual, 1),
-            "primer_rojo": primer_rojo
+            "primer_rojo_total": primer_rojo_total,
+            "primer_rojo_por_fondo": primer_rojo_por_fondo
         }
     finally:
         conn.close()
