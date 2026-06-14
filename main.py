@@ -65,8 +65,30 @@ def get_fondos_admin():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, nombre, tipo, moneda, saldo_inicial, activo, es_sistema FROM fondos ORDER BY id")
+            cur.execute("SELECT id, nombre, abrev, tipo, moneda, saldo_inicial, activo, es_sistema FROM fondos ORDER BY id")
             return cur.fetchall()
+    finally:
+        conn.close()
+
+class FondoUpdateIn(BaseModel):
+    nombre: str
+    abrev: Optional[str] = None
+    tipo: str
+    moneda: str
+    saldo_inicial: float
+    activo: bool
+
+@app.put("/fondos/{id}")
+def actualizar_fondo(id: int, f: FondoUpdateIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE fondos SET nombre=%s, abrev=%s, tipo=%s, moneda=%s, saldo_inicial=%s, activo=%s
+                WHERE id=%s
+            """, (f.nombre, f.abrev, f.tipo, f.moneda, f.saldo_inicial, f.activo, id))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
