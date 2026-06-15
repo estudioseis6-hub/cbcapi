@@ -203,10 +203,13 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
-                       c.confirmado
+                       c.confirmado,
+                       ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
+                       ch.estado AS estado_cheque
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
                 LEFT JOIN fondos f ON c.id_fondo = f.id
+                LEFT JOIN cheques_emitidos ch ON ch.id_cashflow = c.id
             """
             if where:
                 sql += " WHERE " + " AND ".join(where)
@@ -225,6 +228,7 @@ def get_vencimientos():
                 UPDATE cashflow
                 SET fecha = CURRENT_DATE, mes = EXTRACT(MONTH FROM CURRENT_DATE)::integer
                 WHERE confirmado = false AND fecha < CURRENT_DATE
+                AND id NOT IN (SELECT id_cashflow FROM cheques_emitidos WHERE id_cashflow IS NOT NULL)
             """)
             movidos = cur.rowcount
             conn.commit()
@@ -252,6 +256,7 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
             fecha = date.fromisoformat(body.fecha) if body and body.fecha else date.today()
             cur.execute("UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s",
                         (fecha, fecha.month, id))
+            cur.execute("UPDATE cheques_emitidos SET estado='DEBITADO' WHERE id_cashflow=%s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
@@ -293,6 +298,56 @@ def crear_movimiento(m: MovimientoIn):
             """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo))
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+class ECheqIn(BaseModel):
+    fecha_emision: str
+    fecha_vencimiento: str
+    nro_cheque: str
+    id_titular: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    importe: float
+
+@app.post("/cheques_emitidos")
+def crear_echeq(c: ECheqIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha_emision = date.fromisoformat(c.fecha_emision)
+            fecha_vto = date.fromisoformat(c.fecha_vencimiento)
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                RETURNING id
+            """, (fecha_vto.month, fecha_vto, c.id_titular, c.cod_cuenta, c.detalle, -abs(c.importe), c.id_fondo))
+            id_cashflow = cur.fetchone()["id"]
+            cur.execute("""
+                INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow)
+                VALUES (%s, %s, %s, 'EMITIDO', %s)
+            """, (c.nro_cheque, fecha_emision, fecha_vto, id_cashflow))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/cheques_emitidos")
+def get_cheques_emitidos():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ch.id, ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento, ch.estado,
+                       t.nombre titular, f.nombre fondo, c.importe, c.detalle, c.confirmado
+                FROM cheques_emitidos ch
+                JOIN cashflow c ON ch.id_cashflow = c.id
+                JOIN titulares t ON c.id_titular = t.id
+                JOIN fondos f ON c.id_fondo = f.id
+                ORDER BY ch.fecha_vencimiento ASC
+            """)
+            return cur.fetchall()
     finally:
         conn.close()
 
@@ -725,7 +780,6 @@ def vincular_titular_factura(id: str, v: VincularTitularIn):
     finally:
         conn.close()
 
-
 @app.delete("/titulares/{id}")
 def eliminar_titular(id: str):
     conn = get_conn()
@@ -758,7 +812,6 @@ def eliminar_operacion(id: int):
         return {"ok": True}
     finally:
         conn.close()
-
 
 class ItemFacturaIn(BaseModel):
     producto: Optional[str] = None
@@ -850,7 +903,6 @@ def guardar_factura(c: FacturaGuardarIn):
         }
     finally:
         conn.close()
-
 
 @app.get("/proyeccion_alerta")
 def get_proyeccion_alerta():
