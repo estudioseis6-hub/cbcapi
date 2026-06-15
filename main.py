@@ -488,6 +488,7 @@ class PagoIn(BaseModel):
     cod_cuenta: str
     detalle: str
     ids_operaciones: list[int]
+    medio_pago: str = "TD"
 
 @app.post("/registrar_pago")
 def registrar_pago(p: PagoIn):
@@ -497,15 +498,22 @@ def registrar_pago(p: PagoIn):
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
-            cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, true)
-                RETURNING id
-            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
-            id_pago = cur.fetchone()["id"]
-            cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
-        conn.commit()
-        return {"ok": True, "id_pago": id_pago, "total": total}
+            if p.medio_pago == "ECHEQ":
+                # No crear fila en cashflow — el ECheq proyectado lo crea /cheques_emitidos
+                # Solo marcar operaciones como pagadas con id_pago = -1 (señal de ECheq)
+                cur.execute("UPDATE operaciones SET id_pago = -1 WHERE id = ANY(%s)", (p.ids_operaciones,))
+                conn.commit()
+                return {"ok": True, "id_pago": -1, "total": total}
+            else:
+                cur.execute("""
+                    INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, true)
+                    RETURNING id
+                """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+                id_pago = cur.fetchone()["id"]
+                cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
+            conn.commit()
+            return {"ok": True, "id_pago": id_pago, "total": total}
     finally:
         conn.close()
 
