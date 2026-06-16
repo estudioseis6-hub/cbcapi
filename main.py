@@ -291,15 +291,15 @@ def crear_movimiento(m: MovimientoIn):
     try:
         with conn.cursor() as cur:
             fecha = date.fromisoformat(m.fecha)
+            confirmado = fecha <= date.today()
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, true)
-            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo))
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado))
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
-
 class ECheqIn(BaseModel):
     fecha_emision: str
     fecha_vencimiento: str
