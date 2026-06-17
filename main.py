@@ -831,12 +831,13 @@ def eliminar_cashflow(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
+            cur.execute("DELETE FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
             cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
-
 @app.delete("/operaciones/{id}")
 def eliminar_operacion(id: int):
     conn = get_conn()
