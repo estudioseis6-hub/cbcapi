@@ -492,8 +492,8 @@ def crear_cuenta(c: CuentaIn):
     finally:
         conn.close()
 
-@app.put("/plan_cuentas/{nombre}")
-def actualizar_cuenta(nombre: str, c: CuentaIn):
+@app.put("/plan_cuentas/{id}")
+def actualizar_cuenta(id: int, c: CuentaIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -501,25 +501,24 @@ def actualizar_cuenta(nombre: str, c: CuentaIn):
                 UPDATE plan_de_cuentas
                 SET niv1=%s, niv1_desc=%s, niv2=%s, niv2_desc=%s,
                     nombre=%s, signo=%s, fondo=%s
-                WHERE nombre=%s
+                WHERE id=%s
             """, (c.niv1, c.niv1_desc, c.niv2, c.niv2_desc,
-                  c.nombre, c.signo, c.fondo or None, nombre))
+                  c.nombre, c.signo, c.fondo or None, id))
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
 
-@app.delete("/plan_cuentas/{nombre}")
-def eliminar_cuenta(nombre: str):
+@app.delete("/plan_cuentas/{id}")
+def eliminar_cuenta(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM plan_de_cuentas WHERE nombre=%s", (nombre,))
+            cur.execute("DELETE FROM plan_de_cuentas WHERE id=%s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
-
 @app.get("/balance")
 def get_balance(mes: Optional[int] = None):
     conn = get_conn()
