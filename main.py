@@ -59,6 +59,7 @@ def get_fondos():
             return cur.fetchall()
     finally:
         conn.close()
+
 @app.get("/fondos_admin")
 def get_fondos_admin():
     conn = get_conn()
@@ -300,6 +301,7 @@ def crear_movimiento(m: MovimientoIn):
         return {"ok": True}
     finally:
         conn.close()
+
 class ECheqIn(BaseModel):
     fecha_emision: str
     fecha_vencimiento: str
@@ -453,11 +455,68 @@ def get_plan_cuentas():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT niv1_desc, niv2_desc, nombre, signo, fondo
+                SELECT niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, nombre, signo, fondo
                 FROM plan_de_cuentas
                 ORDER BY niv1,niv2,niv3,niv4,niv5
             """)
             return cur.fetchall()
+    finally:
+        conn.close()
+
+class CuentaIn(BaseModel):
+    niv1: int
+    niv1_desc: str
+    niv2: int
+    niv2_desc: str
+    nombre: str
+    signo: Optional[str] = None
+    fondo: Optional[str] = None
+
+@app.post("/plan_cuentas")
+def crear_cuenta(c: CuentaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(MAX(niv5), 0) + 1 AS siguiente
+                FROM plan_de_cuentas
+                WHERE niv1=%s AND niv2=%s AND niv3=1 AND niv4=1
+            """, (c.niv1, c.niv2))
+            siguiente = cur.fetchone()["siguiente"]
+            cur.execute("""
+                INSERT INTO plan_de_cuentas (niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, nombre, signo, fondo)
+                VALUES (%s, %s, 1, 1, %s, %s, %s, %s, %s, %s)
+            """, (c.niv1, c.niv2, siguiente, c.niv1_desc, c.niv2_desc, c.nombre, c.signo, c.fondo or None))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/plan_cuentas/{nombre}")
+def actualizar_cuenta(nombre: str, c: CuentaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE plan_de_cuentas
+                SET niv1=%s, niv1_desc=%s, niv2=%s, niv2_desc=%s,
+                    nombre=%s, signo=%s, fondo=%s
+                WHERE nombre=%s
+            """, (c.niv1, c.niv1_desc, c.niv2, c.niv2_desc,
+                  c.nombre, c.signo, c.fondo or None, nombre))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/plan_cuentas/{nombre}")
+def eliminar_cuenta(nombre: str):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM plan_de_cuentas WHERE nombre=%s", (nombre,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -838,6 +897,7 @@ def eliminar_cashflow(id: int):
         return {"ok": True}
     finally:
         conn.close()
+
 @app.delete("/operaciones/{id}")
 def eliminar_operacion(id: int):
     conn = get_conn()
