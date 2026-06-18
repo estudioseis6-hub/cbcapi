@@ -455,7 +455,7 @@ def get_plan_cuentas():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, nombre, signo, fondo
+                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, nombre, signo, fondo
                 FROM plan_de_cuentas
                 ORDER BY niv1,niv2,niv3,niv4,niv5
             """)
