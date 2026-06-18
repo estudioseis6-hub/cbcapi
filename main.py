@@ -455,10 +455,30 @@ def get_plan_cuentas():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, nombre, signo, fondo
+                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc, nombre, signo, fondo, dd, activo, cod_cbc, moneda
                 FROM plan_de_cuentas
                 ORDER BY niv1,niv2,niv3,niv4,niv5
             """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/plan_cuentas_grupos")
+def get_plan_cuentas_grupos(niv1: Optional[int] = None, niv2: Optional[int] = None, niv3: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = ["activo = true"]
+            params = []
+            if niv1: where.append("niv1 = %s"); params.append(niv1)
+            if niv2: where.append("niv2 = %s"); params.append(niv2)
+            if niv3: where.append("niv3 = %s"); params.append(niv3)
+            cur.execute(f"""
+                SELECT DISTINCT niv1, niv2, niv3, niv3_desc, niv4, niv4_desc
+                FROM plan_cuentas_grupos
+                WHERE {" AND ".join(where)}
+                ORDER BY niv1, niv2, niv3, niv4
+            """, params)
             return cur.fetchall()
     finally:
         conn.close()
@@ -468,25 +488,42 @@ class CuentaIn(BaseModel):
     niv1_desc: str
     niv2: int
     niv2_desc: str
+    niv3: Optional[int] = 1
+    niv3_desc: Optional[str] = None
+    niv4: Optional[int] = 1
+    niv4_desc: Optional[str] = None
+    niv5: Optional[int] = None
     nombre: str
+    cod_cbc: Optional[str] = None
     signo: Optional[str] = None
     fondo: Optional[str] = None
+    moneda: Optional[str] = "ARS"
+    dd: Optional[bool] = False
+    activo: Optional[bool] = True
 
 @app.post("/plan_cuentas")
 def crear_cuenta(c: CuentaIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            if c.niv5 is None:
+                cur.execute("""
+                    SELECT COALESCE(MAX(niv5), 0) + 1 AS siguiente
+                    FROM plan_de_cuentas
+                    WHERE niv1=%s AND niv2=%s AND niv3=%s AND niv4=%s
+                """, (c.niv1, c.niv2, c.niv3, c.niv4))
+                niv5 = cur.fetchone()["siguiente"]
+            else:
+                niv5 = c.niv5
             cur.execute("""
-                SELECT COALESCE(MAX(niv5), 0) + 1 AS siguiente
-                FROM plan_de_cuentas
-                WHERE niv1=%s AND niv2=%s AND niv3=1 AND niv4=1
-            """, (c.niv1, c.niv2))
-            siguiente = cur.fetchone()["siguiente"]
-            cur.execute("""
-                INSERT INTO plan_de_cuentas (niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, nombre, signo, fondo)
-                VALUES (%s, %s, 1, 1, %s, %s, %s, %s, %s, %s)
-            """, (c.niv1, c.niv2, siguiente, c.niv1_desc, c.niv2_desc, c.nombre, c.signo, c.fondo or None))
+                INSERT INTO plan_de_cuentas
+                    (niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc,
+                     nombre, cod_cbc, signo, fondo, moneda, dd, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (c.niv1, c.niv2, c.niv3, c.niv4, niv5,
+                  c.niv1_desc, c.niv2_desc, c.niv3_desc, c.niv4_desc,
+                  c.nombre, c.cod_cbc, c.signo, c.fondo or None,
+                  c.moneda, c.dd, c.activo))
         conn.commit()
         return {"ok": True}
     finally:
@@ -500,10 +537,14 @@ def actualizar_cuenta(id: int, c: CuentaIn):
             cur.execute("""
                 UPDATE plan_de_cuentas
                 SET niv1=%s, niv1_desc=%s, niv2=%s, niv2_desc=%s,
-                    nombre=%s, signo=%s, fondo=%s
+                    niv3=%s, niv3_desc=%s, niv4=%s, niv4_desc=%s,
+                    nombre=%s, cod_cbc=%s, signo=%s, fondo=%s,
+                    moneda=%s, dd=%s, activo=%s
                 WHERE id=%s
             """, (c.niv1, c.niv1_desc, c.niv2, c.niv2_desc,
-                  c.nombre, c.signo, c.fondo or None, id))
+                  c.niv3, c.niv3_desc, c.niv4, c.niv4_desc,
+                  c.nombre, c.cod_cbc, c.signo, c.fondo or None,
+                  c.moneda, c.dd, c.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -519,6 +560,7 @@ def eliminar_cuenta(id: int):
         return {"ok": True}
     finally:
         conn.close()
+
 @app.get("/balance")
 def get_balance(mes: Optional[int] = None):
     conn = get_conn()
