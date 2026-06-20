@@ -943,7 +943,19 @@ def eliminar_cashflow(id: int):
         return {"ok": True}
     finally:
         conn.close()
+class CashflowUpdateIn(BaseModel):
+    importe: float
 
+@app.put("/cashflow/{id}")
+def actualizar_cashflow(id: int, c: CashflowUpdateIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE cashflow SET importe=%s WHERE id=%s", (c.importe, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 @app.delete("/operaciones/{id}")
 def eliminar_operacion(id: int):
     conn = get_conn()
