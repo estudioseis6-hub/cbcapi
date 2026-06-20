@@ -116,7 +116,7 @@ def get_titulares():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, nombre, nivel1,
+                SELECT id, nombre, nivel1, nivel2, nivel3, nivel4,
                        COALESCE(tipo_titular, 'PROVEEDOR') tipo_titular,
                        COALESCE(plazo_pago, 0) plazo_pago,
                        cod1, cod2, cod3, cod4, cod5,
@@ -132,6 +132,9 @@ def get_titulares():
 class TitularIn(BaseModel):
     nombre: str
     nivel1: str
+    nivel2: Optional[str] = None
+    nivel3: Optional[str] = None
+    nivel4: Optional[str] = None
     tipo_titular: str
     plazo_pago: int
     razon_social: Optional[str] = None
@@ -152,9 +155,9 @@ def crear_titular(t: TitularIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO titulares (nombre, nivel1, tipo_titular, plazo_pago, razon_social, cuit, cond_fiscal, cod1, cod2, cod3, cod4, cod5, fondo_def, genera_cc, activo)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago, t.razon_social, t.cuit, t.cond_fiscal, t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.fondo_def, t.genera_cc, t.activo))
+                INSERT INTO titulares (nombre, nivel1, nivel2, nivel3, nivel4, tipo_titular, plazo_pago, razon_social, cuit, cond_fiscal, cod1, cod2, cod3, cod4, cod5, fondo_def, genera_cc, activo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (t.nombre, t.nivel1, t.nivel2, t.nivel3, t.nivel4, t.tipo_titular, t.plazo_pago, t.razon_social, t.cuit, t.cond_fiscal, t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.fondo_def, t.genera_cc, t.activo))
         conn.commit()
         return {"ok": True}
     finally:
@@ -166,12 +169,12 @@ def actualizar_titular(id: str, t: TitularIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE titulares SET nombre=%s, nivel1=%s, tipo_titular=%s, plazo_pago=%s,
+                UPDATE titulares SET nombre=%s, nivel1=%s, nivel2=%s, nivel3=%s, nivel4=%s, tipo_titular=%s, plazo_pago=%s,
                        razon_social=%s, cuit=%s, cond_fiscal=%s,
                        cod1=%s, cod2=%s, cod3=%s, cod4=%s, cod5=%s,
                        fondo_def=%s, genera_cc=%s, activo=%s
                 WHERE id=%s
-            """, (t.nombre, t.nivel1, t.tipo_titular, t.plazo_pago,
+            """, (t.nombre, t.nivel1, t.nivel2, t.nivel3, t.nivel4, t.tipo_titular, t.plazo_pago,
                   t.razon_social, t.cuit, t.cond_fiscal,
                   t.cod1, t.cod2, t.cod3, t.cod4, t.cod5,
                   t.fondo_def, t.genera_cc, t.activo, id))
@@ -179,7 +182,6 @@ def actualizar_titular(id: str, t: TitularIn):
         return {"ok": True}
     finally:
         conn.close()
-
 @app.get("/cuentas")
 def get_cuentas():
     conn = get_conn()
