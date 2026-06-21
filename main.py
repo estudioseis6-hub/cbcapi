@@ -1,523 +1,1150 @@
-import React, { useState, useEffect } from "react";
+from dotenv import load_dotenv
+import pathlib
+load_dotenv(dotenv_path=pathlib.Path(__file__).parent / ".env")
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from datetime import date, timedelta
+from typing import Optional
+from pydantic import BaseModel
+from collections import defaultdict
 
-const API = process.env.REACT_APP_API || "https://cbcapi.onrender.com";
+app = FastAPI()
 
-const NIV1_OPCIONES = [
-  { niv1: 1, desc: "Resultados" },
-  { niv1: 2, desc: "Patrimonial" },
-  { niv1: 3, desc: "Movimiento" },
-];
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-const NIV2_OPCIONES = [
-  { niv1: 1, niv2: 1, desc: "Ventas" },
-  { niv1: 1, niv2: 2, desc: "Deducciones Variables" },
-  { niv1: 1, niv2: 3, desc: "Gastos" },
-  { niv1: 2, niv2: 1, desc: "Activo" },
-  { niv1: 2, niv2: 2, desc: "Pasivo" },
-  { niv1: 2, niv2: 3, desc: "Patrimonio" },
-  { niv1: 3, niv2: 1, desc: "Mov. Fondos" },
-];
+import os
+DB = os.environ.get("DATABASE_URL")
 
-function ModalCuenta({ cuenta, fondos, onCerrar, onGuardado }) {
-  const esNueva = !cuenta;
-  const [form, setForm] = useState({
-    niv1: cuenta?.niv1 || 1,
-    niv1_desc: cuenta?.niv1_desc || "Resultados",
-    niv2: cuenta?.niv2 || 1,
-    niv2_desc: cuenta?.niv2_desc || "Ventas",
-    niv3: cuenta?.niv3 || 1,
-    niv3_desc: cuenta?.niv3_desc || "",
-    niv4: cuenta?.niv4 || 1,
-    niv4_desc: cuenta?.niv4_desc || "",
-    niv5: cuenta?.niv5 || 1,
-    nombre: cuenta?.nombre || "",
-    cod_cbc: cuenta?.cod_cbc ? String(cuenta.cod_cbc) : "",
-    fondo: cuenta?.fondo || "",
-    signo: cuenta?.signo || "",
-    moneda: cuenta?.moneda || "ARS",
-    dd: cuenta?.dd || false,
-    activo: cuenta?.activo ?? true,
-  });
-  const [grupos, setGrupos] = useState([]);
-  const [subgrupos, setSubgrupos] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState(null);
+def get_conn():
+    return psycopg2.connect(DB, cursor_factory=RealDictCursor)
 
-  const niv2Filtradas = NIV2_OPCIONES.filter(n => n.niv1 === parseInt(form.niv1));
+@app.get("/")
+def root():
+    return {"status": "ok"}
 
-  const cargarGrupos = (niv1, niv2, niv3) => {
-    fetch(`${API}/plan_cuentas_grupos?niv1=${niv1}&niv2=${niv2}`)
-      .then(r => r.json())
-      .then(data => {
-        const niv3Unicos = [...new Map(data.map(g => [g.niv3, g])).values()];
-        setGrupos(niv3Unicos);
-        setSubgrupos(data.filter(g => g.niv3 === parseInt(niv3) && g.niv4 !== null));
-      });
-  };
+@app.get("/ping")
+def ping():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return {"status": "ok"}
+    finally:
+        conn.close()
 
-  useEffect(() => {
-    cargarGrupos(form.niv1, form.niv2, form.niv3);
-  }, []);
+@app.get("/fondos")
+def get_fondos():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
+                       f.saldo_inicial, f.slot, f.abrev, f.grupo,
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS movimientos,
+                       COALESCE(SUM(CASE WHEN c.fecha > CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS proyectado
+                FROM fondos f
+                LEFT JOIN cashflow c ON c.id_fondo = f.id
+                WHERE f.slot IS NOT NULL
+                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev, f.grupo
+                ORDER BY f.orden
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-  useEffect(() => {
-    cargarGrupos(form.niv1, form.niv2, form.niv3);
-  }, [form.niv1, form.niv2]);
+@app.get("/fondos_admin")
+def get_fondos_admin():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, nombre, abrev, tipo, moneda, saldo_inicial, activo, es_sistema FROM fondos ORDER BY id")
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-  useEffect(() => {
-    if (!form.niv3) return;
-    fetch(`${API}/plan_cuentas_grupos?niv1=${form.niv1}&niv2=${form.niv2}&niv3=${form.niv3}`)
-      .then(r => r.json())
-      .then(data => {
-        setSubgrupos(data.filter(g => g.niv4 !== null));
-      });
-  }, [form.niv3]);
+class FondoUpdateIn(BaseModel):
+    nombre: str
+    abrev: Optional[str] = None
+    tipo: str
+    moneda: str
+    saldo_inicial: float
+    activo: bool
 
-  const handleNiv1Change = (e) => {
-    const niv1 = parseInt(e.target.value);
-    const desc = NIV1_OPCIONES.find(n => n.niv1 === niv1)?.desc || "";
-    const primeroNiv2 = NIV2_OPCIONES.find(n => n.niv1 === niv1);
-    setForm({ ...form, niv1, niv1_desc: desc, niv2: primeroNiv2?.niv2 || 1, niv2_desc: primeroNiv2?.desc || "", niv3: 1, niv3_desc: "", niv4: 1, niv4_desc: "" });
-  };
+@app.put("/fondos/{id}")
+def actualizar_fondo(id: int, f: FondoUpdateIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE fondos SET nombre=%s, abrev=%s, tipo=%s, moneda=%s, saldo_inicial=%s, activo=%s
+                WHERE id=%s
+            """, (f.nombre, f.abrev, f.tipo, f.moneda, f.saldo_inicial, f.activo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  const handleNiv2Change = (e) => {
-    const niv2 = parseInt(e.target.value);
-    const desc = NIV2_OPCIONES.find(n => n.niv1 === parseInt(form.niv1) && n.niv2 === niv2)?.desc || "";
-    setForm({ ...form, niv2, niv2_desc: desc, niv3: 1, niv3_desc: "", niv4: 1, niv4_desc: "" });
-  };
+class FondoIn(BaseModel):
+    nombre: str
+    tipo: str
+    moneda: str
+    saldo_inicial: float
 
-  const handleNiv3Change = (e) => {
-    const niv3 = parseInt(e.target.value);
-    const grupo = grupos.find(g => g.niv3 === niv3);
-    setForm({ ...form, niv3, niv3_desc: grupo?.niv3_desc || "", niv4: 1, niv4_desc: "" });
-  };
+@app.post("/fondos")
+def crear_fondo(f: FondoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO fondos (nombre, tipo, moneda, saldo_inicial, es_sistema) VALUES (%s, %s, %s, %s, false)",
+                       (f.nombre, f.tipo, f.moneda, f.saldo_inicial))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  const handleNiv4Change = (e) => {
-    const niv4 = parseInt(e.target.value);
-    const sub = subgrupos.find(s => s.niv4 === niv4);
-    setForm({ ...form, niv4, niv4_desc: sub?.niv4_desc || "" });
-  };
+@app.get("/titulares")
+def get_titulares():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, nombre, nivel1, nivel2, nivel3, nivel4,
+                       COALESCE(tipo_titular, 'PROVEEDOR') tipo_titular,
+                       COALESCE(plazo_pago, 0) plazo_pago,
+                       cod1, cod2, cod3, cod4, cod5,
+                       fondo_def, razon_social, cuit, cond_fiscal,
+                       genera_cc, activo, iva_default
+                FROM titulares
+                ORDER BY CASE WHEN nivel1='SISTEMA' THEN 0 ELSE 1 END, nombre
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-  const handleSubmit = async () => {
-    if (!form.nombre.trim()) { setMsg("El nombre es obligatorio."); return; }
-    setLoading(true);
-    try {
-      const payload = {
-  ...form,
-  niv1: parseInt(form.niv1),
-  niv2: parseInt(form.niv2),
-  niv3: parseInt(form.niv3) || 1,
-  niv4: parseInt(form.niv4) || 1,
-  niv5: parseInt(form.niv5) || 1,
-  cod_cbc: form.cod_cbc ? String(form.cod_cbc) : null,
-};
-      const url = esNueva ? `${API}/plan_cuentas` : `${API}/plan_cuentas/${parseInt(cuenta.id)}`;
-      const method = esNueva ? "POST" : "PUT";
-      const r = await fetch(url, {
-        method, headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (r.ok) { onGuardado(); onCerrar(); }
-      else setMsg("Error al guardar.");
-    } catch { setMsg("Error de conexion."); }
-    setLoading(false);
-  };
+class TitularIn(BaseModel):
+    nombre: str
+    nivel1: str
+    nivel2: Optional[str] = None
+    nivel3: Optional[str] = None
+    nivel4: Optional[str] = None
+    tipo_titular: str
+    plazo_pago: int
+    razon_social: Optional[str] = None
+    cuit: Optional[str] = None
+    cond_fiscal: Optional[str] = None
+    cod1: Optional[str] = None
+    cod2: Optional[str] = None
+    cod3: Optional[str] = None
+    cod4: Optional[str] = None
+    cod5: Optional[str] = None
+    fondo_def: Optional[str] = None
+    genera_cc: Optional[bool] = True
+    activo: Optional[bool] = True
+    iva_default: Optional[float] = None
 
-  const lbl = { display: "block", fontSize: 13, color: "#374151", marginBottom: 6 };
-  const inp = { width: "100%", padding: "8px 12px", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 14, boxSizing: "border-box" };
+@app.post("/titulares")
+def crear_titular(t: TitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO titulares (nombre, nivel1, nivel2, nivel3, nivel4, tipo_titular, plazo_pago, razon_social, cuit, cond_fiscal, cod1, cod2, cod3, cod4, cod5, fondo_def, genera_cc, activo, iva_default)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (t.nombre, t.nivel1, t.nivel2, t.nivel3, t.nivel4, t.tipo_titular, t.plazo_pago, t.razon_social, t.cuit, t.cond_fiscal, t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.fondo_def, t.genera_cc, t.activo, t.iva_default))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-      <div style={{ background: "white", borderRadius: 12, padding: 32, width: 560, boxShadow: "0 8px 32px rgba(0,0,0,0.2)", maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-          <div style={{ fontSize: 16, color: "#2c3e50" }}>{esNueva ? "Nueva cuenta" : `Editar — ${cuenta.nombre}`}</div>
-          <div onClick={onCerrar} style={{ cursor: "pointer", color: "#94a3b8", fontSize: 20 }}>×</div>
-        </div>
-        {msg && <div style={{ padding: "10px 16px", borderRadius: 8, marginBottom: 16, background: "#fee2e2", color: "#991b1b" }}>{msg}</div>}
+@app.put("/titulares/{id}")
+def actualizar_titular(id: str, t: TitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE titulares SET nombre=%s, nivel1=%s, nivel2=%s, nivel3=%s, nivel4=%s, tipo_titular=%s, plazo_pago=%s,
+                       razon_social=%s, cuit=%s, cond_fiscal=%s,
+                       cod1=%s, cod2=%s, cod3=%s, cod4=%s, cod5=%s,
+                       fondo_def=%s, genera_cc=%s, activo=%s, iva_default=%s
+                WHERE id=%s
+            """, (t.nombre, t.nivel1, t.nivel2, t.nivel3, t.nivel4, t.tipo_titular, t.plazo_pago,
+                  t.razon_social, t.cuit, t.cond_fiscal,
+                  t.cod1, t.cod2, t.cod3, t.cod4, t.cod5,
+                  t.fondo_def, t.genera_cc, t.activo, t.iva_default, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Jerarquía</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
-          <div>
-            <label style={lbl}>Bloque (niv1)</label>
-            <select value={form.niv1} onChange={handleNiv1Change} style={inp}>
-              {NIV1_OPCIONES.map(n => <option key={n.niv1} value={n.niv1}>{n.desc}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={lbl}>Subbloque (niv2)</label>
-            <select value={form.niv2} onChange={handleNiv2Change} style={inp}>
-              {niv2Filtradas.map(n => <option key={n.niv2} value={n.niv2}>{n.desc}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={lbl}>Grupo (niv3)</label>
-            <select value={form.niv3} onChange={handleNiv3Change} style={inp}>
-              <option value="">— Seleccionar —</option>
-              {grupos.map(g => <option key={g.niv3} value={g.niv3}>{g.niv3_desc}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={lbl}>Subgrupo (niv4)</label>
-            {subgrupos.length > 0 ? (
-              <select value={form.niv4} onChange={handleNiv4Change} style={inp}>
-                <option value="">— Sin subgrupo —</option>
-                {subgrupos.map(s => <option key={s.niv4} value={s.niv4}>{s.niv4_desc}</option>)}
-              </select>
-            ) : (
-              <div style={{ ...inp, background: "#f8fafc", color: "#94a3b8", display: "flex", alignItems: "center" }}>
-                Sin subgrupos en este grupo
-              </div>
-            )}
-          </div>
-          <div style={{ gridColumn: "1 / -1" }}>
-            <label style={lbl}>Nombre de la cuenta (nivel 5)</label>
-            <input type="text" value={form.nombre} onChange={e => setForm({...form, nombre: e.target.value})} style={inp} placeholder="Ej: Costo de Carnes" />
-          </div>
-          <div>
-            <label style={lbl}>Orden niv5</label>
-            <input type="number" value={form.niv5} onChange={e => setForm({...form, niv5: parseInt(e.target.value) || 1})} style={inp} min="1" />
-          </div>
-        </div>
+@app.get("/cuentas")
+def get_cuentas():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT nombre FROM plan_de_cuentas ORDER BY niv1,niv2,niv3,niv4,niv5")
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Configuración</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
-          <div>
-            <label style={lbl}>Código CBC</label>
-            <input type="text" value={form.cod_cbc} onChange={e => setForm({...form, cod_cbc: e.target.value})} style={inp} placeholder="Ej: 1.1.1" />
-          </div>
-          <div>
-            <label style={lbl}>Moneda</label>
-            <select value={form.moneda} onChange={e => setForm({...form, moneda: e.target.value})} style={inp}>
-              <option value="ARS">ARS</option>
-              <option value="USD">USD</option>
-            </select>
-          </div>
-          <div>
-            <label style={lbl}>Fondo asociado</label>
-            <select value={form.fondo || ""} onChange={e => setForm({...form, fondo: e.target.value})} style={inp}>
-              <option value="">— Sin fondo —</option>
-              {fondos.map(f => <option key={f.id} value={f.nombre}>{f.nombre}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={lbl}>Signo</label>
-            <input type="text" value={form.signo || ""} onChange={e => setForm({...form, signo: e.target.value})} style={inp} placeholder="+ o -" />
-          </div>
-        </div>
+@app.get("/cashflow")
+def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = []
+            if mes:
+                where.append(f"c.mes={mes}")
+            if id_fondo:
+                where.append(f"c.id_fondo={id_fondo}")
+            sql = """
+                SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
+                       c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
+                       c.confirmado,
+                       ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
+                       ch.estado AS estado_cheque
+                FROM cashflow c
+                LEFT JOIN titulares t ON c.id_titular = t.id
+                LEFT JOIN fondos f ON c.id_fondo = f.id
+                LEFT JOIN cheques_emitidos ch ON ch.id_cashflow = c.id
+            """
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY c.fecha ASC LIMIT 500"
+            cur.execute(sql)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-        <div style={{ display: "flex", gap: 24, marginBottom: 24 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: "#374151" }}>
-            <input type="checkbox" checked={!!form.dd} onChange={e => setForm({...form, dd: e.target.checked})} />
-            Débito directo (DD)
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: "#374151" }}>
-            <input type="checkbox" checked={!!form.activo} onChange={e => setForm({...form, activo: e.target.checked})} />
-            Activo
-          </label>
-        </div>
+@app.get("/vencimientos")
+def get_vencimientos():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE cashflow
+                SET fecha = CURRENT_DATE, mes = EXTRACT(MONTH FROM CURRENT_DATE)::integer
+                WHERE confirmado = false AND fecha < CURRENT_DATE
+                AND id NOT IN (SELECT id_cashflow FROM cheques_emitidos WHERE id_cashflow IS NOT NULL)
+            """)
+            movidos = cur.rowcount
+            conn.commit()
+            cur.execute("""
+                SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
+                       c.detalle, c.importe
+                FROM cashflow c
+                LEFT JOIN titulares t ON c.id_titular = t.id
+                LEFT JOIN fondos f ON c.id_fondo = f.id
+                WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
+                ORDER BY c.fecha ASC
+            """)
+            return {"vencimientos": cur.fetchall(), "movidos": movidos}
+    finally:
+        conn.close()
 
-        <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
-          <div onClick={onCerrar} style={{ padding: "10px 20px", borderRadius: 8, border: "1px solid #e2e8f0", cursor: "pointer", fontSize: 13, color: "#64748b" }}>Cancelar</div>
-          <div onClick={handleSubmit} style={{ padding: "10px 20px", borderRadius: 8, background: "#2c3e50", color: "white", cursor: "pointer", fontSize: 13 }}>
-            {loading ? "Guardando..." : "Guardar"}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+class ConfirmarPagoIn(BaseModel):
+    fecha: Optional[str] = None
 
-export default function Admin({ onNavegar }) {
-  const [seccion, setSeccion] = useState("titulares");
-  const [titulares, setTitulares] = useState([]);
-  const [cashflow, setCashflow] = useState([]);
-  const [operaciones, setOperaciones] = useState([]);
-  const [cuentas, setCuentas] = useState([]);
-  const [fondos, setFondos] = useState([]);
-  const [buscar, setBuscar] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(null);
-  const [msg, setMsg] = useState(null);
-  const [modalCuenta, setModalCuenta] = useState(false);
+@app.post("/vencimientos/{id}/confirmar")
+def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(body.fecha) if body and body.fecha else date.today()
+            cur.execute("UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s",
+                        (fecha, fecha.month, id))
+            cur.execute("UPDATE cheques_emitidos SET estado='DEBITADO' WHERE id_cashflow=%s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  useEffect(() => {
-    fetch(`${API}/fondos`).then(r => r.json()).then(setFondos);
-  }, []);
+class ReprogramarIn(BaseModel):
+    fecha: str
 
-  useEffect(() => {
-    if (seccion === "titulares") fetch(`${API}/titulares`).then(r => r.json()).then(setTitulares);
-    if (seccion === "cashflow") fetch(`${API}/cashflow`).then(r => r.json()).then(setCashflow);
-    if (seccion === "operaciones") fetch(`${API}/operaciones`).then(r => r.json()).then(setOperaciones);
-    if (seccion === "plan_cuentas") fetch(`${API}/plan_cuentas`).then(r => r.json()).then(setCuentas);
-  }, [seccion]);
+@app.post("/vencimientos/{id}/reprogramar")
+def reprogramar_vencimiento(id: int, body: ReprogramarIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(body.fecha)
+            cur.execute("UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s",
+                        (fecha, fecha.month, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  const cargarCuentas = () => fetch(`${API}/plan_cuentas`).then(r => r.json()).then(setCuentas);
+class MovimientoIn(BaseModel):
+    fecha: str
+    id_titular: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    importe: float
 
-  const eliminar = async (endpoint, id) => {
-    try {
-      const r = await fetch(`${API}/${endpoint}/${id}`, { method: "DELETE" });
-      if (r.ok) {
-        setMsg({ tipo: "ok", texto: "Eliminado correctamente" });
-        setConfirmDelete(null);
-        if (seccion === "titulares") fetch(`${API}/titulares`).then(r => r.json()).then(setTitulares);
-        if (seccion === "cashflow") fetch(`${API}/cashflow`).then(r => r.json()).then(setCashflow);
-        if (seccion === "operaciones") fetch(`${API}/operaciones`).then(r => r.json()).then(setOperaciones);
-        if (seccion === "plan_cuentas") cargarCuentas();
-      } else {
-        setMsg({ tipo: "error", texto: "Error al eliminar" });
-      }
-    } catch {
-      setMsg({ tipo: "error", texto: "Error de conexion" });
-    }
-    setTimeout(() => setMsg(null), 3000);
-  };
+@app.post("/cashflow")
+def crear_movimiento(m: MovimientoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(m.fecha)
+            confirmado = fecha <= date.today()
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  const td = { padding: "9px 14px", fontSize: 13, color: "#374151" };
-  const SECCIONES = ["titulares", "cashflow", "operaciones", "plan_cuentas"];
+class ECheqIn(BaseModel):
+    fecha_emision: str
+    fecha_vencimiento: str
+    nro_cheque: str
+    id_titular: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    importe: float
 
-  const titularesFiltrados = titulares
-    .filter(t => t.nivel1 !== "SISTEMA")
-    .filter(t => t.nombre?.toLowerCase().includes(buscar.toLowerCase()) || t.id?.toString().includes(buscar));
+@app.post("/cheques_emitidos")
+def crear_echeq(c: ECheqIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha_emision = date.fromisoformat(c.fecha_emision)
+            fecha_vto = date.fromisoformat(c.fecha_vencimiento)
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                RETURNING id
+            """, (fecha_vto.month, fecha_vto, c.id_titular, c.cod_cuenta, c.detalle, -abs(c.importe), c.id_fondo))
+            id_cashflow = cur.fetchone()["id"]
+            cur.execute("""
+                INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow)
+                VALUES (%s, %s, %s, 'EMITIDO', %s)
+            """, (c.nro_cheque, fecha_emision, fecha_vto, id_cashflow))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 
-  const cashflowFiltrados = cashflow
-    .filter(m => m.titular?.toLowerCase().includes(buscar.toLowerCase()) || m.detalle?.toLowerCase().includes(buscar.toLowerCase()));
+@app.get("/cheques_emitidos")
+def get_cheques_emitidos():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ch.id, ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento, ch.estado,
+                       t.nombre titular, f.nombre fondo, c.importe, c.detalle, c.confirmado
+                FROM cheques_emitidos ch
+                JOIN cashflow c ON ch.id_cashflow = c.id
+                JOIN titulares t ON c.id_titular = t.id
+                JOIN fondos f ON c.id_fondo = f.id
+                ORDER BY ch.fecha_vencimiento ASC
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-  const operacionesFiltradas = operaciones
-    .filter(o => o.titular?.toLowerCase().includes(buscar.toLowerCase()) || o.concepto?.toLowerCase().includes(buscar.toLowerCase()));
+@app.get("/tipos_comprobante")
+def get_tipos_comprobante():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, descripcion FROM tipos_comprobante WHERE activo=true ORDER BY id")
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-  const cuentasFiltradas = cuentas
-    .filter(c => c.nombre?.toLowerCase().includes(buscar.toLowerCase()) ||
-                 c.niv2_desc?.toLowerCase().includes(buscar.toLowerCase()) ||
-                 c.niv3_desc?.toLowerCase().includes(buscar.toLowerCase()));
+@app.get("/operaciones")
+def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = []
+            params = []
+            if id_titular:
+                where.append("o.id_titular = %s")
+                params.append(str(id_titular))
+            if estado == "IMPAGO":
+                where.append("o.id_pago IS NULL")
+            elif estado == "PAGO":
+                where.append("o.id_pago IS NOT NULL")
+            sql = """
+                SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo,
+                       o.numero_comprobante numero, o.descripcion concepto, o.importe,
+                       CASE WHEN o.id_pago IS NULL THEN 'IMPAGO' ELSE 'PAGO' END estado
+                FROM operaciones o
+                LEFT JOIN titulares t ON o.id_titular = t.id
+                LEFT JOIN tipos_comprobante tc ON o.id_tipo_comprobante = tc.id
+            """
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY o.fecha DESC LIMIT 200"
+            cur.execute(sql, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-  const cuentasAgrupadas = cuentasFiltradas.reduce((acc, c) => {
-    const k1 = c.niv1_desc || "—";
-    const k2 = c.niv2_desc || "—";
-    const k3 = c.niv3_desc || "—";
-    if (!acc[k1]) acc[k1] = {};
-    if (!acc[k1][k2]) acc[k1][k2] = {};
-    if (!acc[k1][k2][k3]) acc[k1][k2][k3] = [];
-    acc[k1][k2][k3].push(c);
-    return acc;
-  }, {});
+class ComprobanteIn(BaseModel):
+    fecha: str
+    fecha_compra: Optional[str] = None
+    id_titular: int
+    id_tipo_comprobante: int
+    numero_comprobante: str
+    descripcion: str
+    id_fondo: Optional[int] = None
+    fecha_vencimiento: Optional[str] = None
+    subtotal: Optional[float] = 0
+    exento: Optional[float] = 0
+    iva_105: Optional[float] = 0
+    iva_21: Optional[float] = 0
+    iva_27: Optional[float] = 0
+    perc_iva: Optional[float] = 0
+    perc_iibb: Optional[float] = 0
+    perc_otras: Optional[float] = 0
+    sin_factura: Optional[float] = 0
 
-  return (
-    <div>
-      {confirmDelete && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div style={{ background: "white", borderRadius: 12, padding: 32, width: 380, boxShadow: "0 8px 32px rgba(0,0,0,0.2)" }}>
-            <div style={{ fontSize: 16, color: "#2c3e50", marginBottom: 12 }}>¿Confirmar eliminación?</div>
-            <div style={{ fontSize: 13, color: "#64748b", marginBottom: 24 }}>{confirmDelete.descripcion}</div>
-            <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
-              <div onClick={() => setConfirmDelete(null)} style={{ padding: "8px 20px", borderRadius: 8, border: "1px solid #e2e8f0", cursor: "pointer", fontSize: 13, color: "#64748b" }}>Cancelar</div>
-              <div onClick={() => eliminar(confirmDelete.endpoint, confirmDelete.id)}
-                style={{ padding: "8px 20px", borderRadius: 8, background: "#e00000", color: "white", cursor: "pointer", fontSize: 13 }}>
-                Eliminar
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+@app.post("/operaciones")
+def crear_comprobante(c: ComprobanteIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(c.fecha)
+            fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
+            importe = (
+                (c.subtotal or 0) + (c.exento or 0)
+                + (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
+                + (c.perc_iva or 0) + (c.perc_iibb or 0) + (c.perc_otras or 0)
+                + (c.sin_factura or 0)
+            )
+            cur.execute("""
+                INSERT INTO operaciones
+                    (fecha, fecha_compra, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes,
+                     subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
+                  c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura))
+            id_operacion = cur.fetchone()["id"]
 
-      {modalCuenta !== false && (
-        <ModalCuenta
-          cuenta={modalCuenta === true ? null : modalCuenta}
-          fondos={fondos}
-          onCerrar={() => setModalCuenta(false)}
-          onGuardado={cargarCuentas}
-        />
-      )}
+            plazo = None
+            if not c.fecha_vencimiento:
+                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
+                row = cur.fetchone()
+                if row and row["plazo_pago"] and row["plazo_pago"] > 0:
+                    plazo = row["plazo_pago"]
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-        <div style={{ fontSize: 18, color: "#2c3e50", fontWeight: 500 }}>Panel de Administración</div>
-        <div onClick={() => onNavegar("Inicio")} style={{ fontSize: 13, color: "#2e6da4", cursor: "pointer" }}>← Inicio</div>
-      </div>
+            if c.fecha_vencimiento or plazo:
+                if c.fecha_vencimiento:
+                    fecha_vto = date.fromisoformat(c.fecha_vencimiento)
+                else:
+                    fecha_vto = fecha + timedelta(days=plazo)
 
-      {msg && (
-        <div style={{ padding: "10px 16px", borderRadius: 8, marginBottom: 16, background: msg.tipo === "ok" ? "#d1fae5" : "#fee2e2", color: msg.tipo === "ok" ? "#065f46" : "#991b1b" }}>
-          {msg.texto}
-        </div>
-      )}
+                id_fondo = c.id_fondo
+                if not id_fondo:
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
+                    r = cur.fetchone()
+                    if r and r["fondo_def"]:
+                        id_fondo = r["fondo_def"]
 
-      <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid #9CB7D8" }}>
-        {SECCIONES.map(s => (
-          <div key={s} onClick={() => { setSeccion(s); setBuscar(""); }}
-            style={{ padding: "10px 20px", cursor: "pointer", fontSize: 13,
-              borderBottom: seccion === s ? "2px solid #2e6da4" : "2px solid transparent",
-              color: seccion === s ? "#2e6da4" : "#64748b" }}>
-            {s === "plan_cuentas" ? "Plan de Cuentas" : s.charAt(0).toUpperCase() + s.slice(1)}
-          </div>
-        ))}
-      </div>
+                if id_fondo:
+                    cur.execute("""
+                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <input value={buscar} onChange={e => setBuscar(e.target.value)}
-          placeholder="Buscar..."
-          style={{ padding: "8px 12px", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 14, width: 300 }} />
-        {seccion === "plan_cuentas" && (
-          <div onClick={() => setModalCuenta(true)}
-            style={{ padding: "8px 18px", background: "#2c3e50", color: "white", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>
-            + Nueva cuenta
-          </div>
-        )}
-      </div>
+                conn.commit()
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto)}
+            else:
+                conn.commit()
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": False, "sin_plazo": True}
+    finally:
+        conn.close()
 
-      {seccion === "titulares" && (
-        <div style={{ borderRadius: 8, border: "1px solid #9CB7D8", overflow: "auto", maxHeight: "calc(100vh - 280px)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 9 }}>
-              <tr style={{ background: "#d4dfe6" }}>
-                {["ID", "Nombre", "Tipo", "CUIT", "Activo", ""].map(h => (
-                  <th key={h} style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 600, color: "#2c3e50", textTransform: "uppercase", letterSpacing: 1 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {titularesFiltrados.map((t, i) => (
-                <tr key={i} style={{ borderTop: "1px solid #DEE7F2", background: "white" }}>
-                  <td style={{ ...td, fontSize: 11, color: "#94a3b8", fontFamily: "monospace" }}>{t.id}</td>
-                  <td style={{ ...td, fontWeight: 500 }}>{t.nombre}</td>
-                  <td style={{ ...td, fontSize: 12, color: "#64748b" }}>{t.tipo_titular}</td>
-                  <td style={{ ...td, fontSize: 12, color: "#64748b" }}>{t.cuit || "—"}</td>
-                  <td style={td}>{t.activo ? <span style={{ color: "#059669" }}>✓</span> : <span style={{ color: "#e00000" }}>✗</span>}</td>
-                  <td style={{ padding: "9px 14px", textAlign: "right" }}>
-                    <div onClick={() => setConfirmDelete({ id: t.id, endpoint: "titulares", descripcion: `Eliminar titular: ${t.nombre}` })}
-                      style={{ fontSize: 12, color: "#e00000", cursor: "pointer" }}>Eliminar</div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+@app.get("/plan_cuentas")
+def get_plan_cuentas():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc, nombre, signo, fondo, dd, activo, cod_cbc, moneda
+                FROM plan_de_cuentas
+                ORDER BY niv1,niv2,niv3,niv4,niv5
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-      {seccion === "cashflow" && (
-        <div style={{ borderRadius: 8, border: "1px solid #9CB7D8", overflow: "auto", maxHeight: "calc(100vh - 280px)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 9 }}>
-              <tr style={{ background: "#d4dfe6" }}>
-                {["ID", "Fecha", "Titular", "Detalle", "Importe", "Fondo", ""].map(h => (
-                  <th key={h} style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 600, color: "#2c3e50", textTransform: "uppercase", letterSpacing: 1 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {cashflowFiltrados.map((m, i) => (
-                <tr key={i} style={{ borderTop: "1px solid #DEE7F2", background: "white" }}>
-                  <td style={{ ...td, fontSize: 11, color: "#94a3b8" }}>{m.id}</td>
-                  <td style={{ ...td, fontSize: 12 }}>{m.fecha?.slice(0,10)}</td>
-                  <td style={td}>{m.titular}</td>
-                  <td style={td}>{m.detalle}</td>
-                  <td style={{ ...td, color: m.importe >= 0 ? "#2c3e50" : "#e00000" }}>
-                    ${parseFloat(m.importe).toLocaleString("es-AR", {minimumFractionDigits: 2})}
-                  </td>
-                  <td style={{ ...td, fontSize: 12, color: "#64748b" }}>{m.fondo}</td>
-                  <td style={{ padding: "9px 14px", textAlign: "right" }}>
-                    <div onClick={() => setConfirmDelete({ id: m.id, endpoint: "cashflow", descripcion: `Eliminar movimiento: ${m.detalle} — ${m.titular}` })}
-                      style={{ fontSize: 12, color: "#e00000", cursor: "pointer" }}>Eliminar</div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+@app.get("/plan_cuentas_grupos")
+def get_plan_cuentas_grupos(niv1: Optional[int] = None, niv2: Optional[int] = None, niv3: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = ["activo = true"]
+            params = []
+            if niv1: where.append("niv1 = %s"); params.append(niv1)
+            if niv2: where.append("niv2 = %s"); params.append(niv2)
+            if niv3: where.append("niv3 = %s"); params.append(niv3)
+            cur.execute(f"""
+                SELECT DISTINCT niv1, niv2, niv3, niv3_desc, niv4, niv4_desc
+                FROM plan_cuentas_grupos
+                WHERE {" AND ".join(where)}
+                ORDER BY niv1, niv2, niv3, niv4
+            """, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-      {seccion === "operaciones" && (
-        <div style={{ borderRadius: 8, border: "1px solid #9CB7D8", overflow: "auto", maxHeight: "calc(100vh - 280px)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead style={{ position: "sticky", top: 0, zIndex: 9 }}>
-              <tr style={{ background: "#d4dfe6" }}>
-                {["ID", "Fecha", "Titular", "Concepto", "Importe", "Estado", ""].map(h => (
-                  <th key={h} style={{ padding: "9px 14px", textAlign: "left", fontSize: 11, fontWeight: 600, color: "#2c3e50", textTransform: "uppercase", letterSpacing: 1 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {operacionesFiltradas.map((o, i) => (
-                <tr key={i} style={{ borderTop: "1px solid #DEE7F2", background: "white" }}>
-                  <td style={{ ...td, fontSize: 11, color: "#94a3b8" }}>{o.id}</td>
-                  <td style={{ ...td, fontSize: 12 }}>{o.fecha?.slice(0,10)}</td>
-                  <td style={td}>{o.titular}</td>
-                  <td style={td}>{o.concepto}</td>
-                  <td style={{ ...td, color: "#2c3e50" }}>${parseFloat(o.importe).toLocaleString("es-AR", {minimumFractionDigits: 2})}</td>
-                  <td style={td}>
-                    <span style={{ padding: "2px 8px", borderRadius: 20, fontSize: 11,
-                      background: o.estado === "IMPAGO" ? "#fee2e2" : "#d1fae5",
-                      color: o.estado === "IMPAGO" ? "#991b1b" : "#065f46" }}>
-                      {o.estado}
-                    </span>
-                  </td>
-                  <td style={{ padding: "9px 14px", textAlign: "right" }}>
-                    <div onClick={() => setConfirmDelete({ id: o.id, endpoint: "operaciones", descripcion: `Eliminar comprobante: ${o.concepto} — ${o.titular}` })}
-                      style={{ fontSize: 12, color: "#e00000", cursor: "pointer" }}>Eliminar</div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+class CuentaIn(BaseModel):
+    niv1: int
+    niv1_desc: str
+    niv2: int
+    niv2_desc: str
+    niv3: Optional[int] = 1
+    niv3_desc: Optional[str] = None
+    niv4: Optional[int] = 1
+    niv4_desc: Optional[str] = None
+    niv5: Optional[int] = None
+    nombre: str
+    cod_cbc: Optional[str] = None
+    signo: Optional[str] = None
+    fondo: Optional[str] = None
+    moneda: Optional[str] = "ARS"
+    dd: Optional[bool] = False
+    activo: Optional[bool] = True
 
-      {seccion === "plan_cuentas" && (
-        <div style={{ overflow: "auto", maxHeight: "calc(100vh - 280px)" }}>
-          {Object.entries(cuentasAgrupadas).map(([bloque, subbloques]) => (
-            <div key={bloque} style={{ marginBottom: 28 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12, padding: "8px 14px", background: "#2c3e50", color: "white", borderRadius: 6 }}>
-                {bloque}
-              </div>
-              {Object.entries(subbloques).map(([subbloque, grupos]) => (
-                <div key={subbloque} style={{ marginBottom: 16, marginLeft: 8 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: "#2c3e50", textTransform: "uppercase", letterSpacing: 1, marginBottom: 8, padding: "6px 14px", background: "#d4dfe6", borderRadius: 6 }}>
-                    {subbloque}
-                  </div>
-                  {Object.entries(grupos).map(([grupo, cuentasGrupo]) => (
-                    <div key={grupo} style={{ marginBottom: 12, marginLeft: 8 }}>
-                      {grupo !== "—" && (
-                        <div style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6, padding: "4px 14px", background: "#f1f5f9", borderRadius: 4 }}>
-                          {grupo}
-                        </div>
-                      )}
-                      <div style={{ borderRadius: 8, border: "1px solid #9CB7D8", overflow: "hidden", marginLeft: grupo !== "—" ? 8 : 0 }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                          <thead>
-                            <tr style={{ background: "#f8fafc" }}>
-                              <th style={{ padding: "7px 14px", textAlign: "left", fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1, width: 50 }}>ID</th>
-                              <th style={{ padding: "7px 14px", textAlign: "left", fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1 }}>Cuenta</th>
-                              <th style={{ padding: "7px 14px", textAlign: "left", fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1 }}>Subgrupo</th>
-                              <th style={{ padding: "7px 14px", textAlign: "left", fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1 }}>Fondo</th>
-                              <th style={{ padding: "7px 14px", textAlign: "left", fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1, width: 40 }}>DD</th>
-                              <th style={{ padding: "7px 14px", textAlign: "left", fontSize: 10, fontWeight: 600, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 1, width: 40 }}>Act</th>
-                              <th style={{ width: 120 }}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {cuentasGrupo.map((c, i) => (
-                              <tr key={i} style={{ borderTop: i > 0 ? "1px solid #DEE7F2" : "none", background: "white" }}>
-                                <td style={{ ...td, fontSize: 11, color: "#94a3b8", fontFamily: "monospace" }}>{c.id}</td>
-                                <td style={{ ...td, fontWeight: 500 }}>{c.nombre}</td>
-                                <td style={{ ...td, fontSize: 12, color: "#64748b" }}>{c.niv4_desc || <span style={{ color: "#cbd5e1" }}>—</span>}</td>
-                                <td style={{ ...td, fontSize: 12, color: "#64748b" }}>{c.fondo || <span style={{ color: "#cbd5e1" }}>—</span>}</td>
-                                <td style={{ ...td, fontSize: 12 }}>{c.dd ? <span style={{ color: "#059669" }}>✓</span> : <span style={{ color: "#cbd5e1" }}>—</span>}</td>
-                                <td style={{ ...td, fontSize: 12 }}>{c.activo ? <span style={{ color: "#059669" }}>✓</span> : <span style={{ color: "#e00000" }}>✗</span>}</td>
-                                <td style={{ padding: "9px 14px", textAlign: "right" }}>
-                                  <div style={{ display: "flex", gap: 16, justifyContent: "flex-end" }}>
-                                    <div onClick={() => setModalCuenta(c)} style={{ fontSize: 12, color: "#2e6da4", cursor: "pointer" }}>Editar</div>
-                                    <div onClick={() => setConfirmDelete({ id: c.id, endpoint: "plan_cuentas", descripcion: `Eliminar cuenta: ${c.nombre}` })}
-                                      style={{ fontSize: 12, color: "#e00000", cursor: "pointer" }}>Eliminar</div>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+@app.post("/plan_cuentas")
+def crear_cuenta(c: CuentaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if c.niv5 is None:
+                cur.execute("""
+                    SELECT COALESCE(MAX(niv5), 0) + 1 AS siguiente
+                    FROM plan_de_cuentas
+                    WHERE niv1=%s AND niv2=%s AND niv3=%s AND niv4=%s
+                """, (c.niv1, c.niv2, c.niv3, c.niv4))
+                niv5 = cur.fetchone()["siguiente"]
+            else:
+                niv5 = c.niv5
+            cur.execute("""
+                INSERT INTO plan_de_cuentas
+                    (niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc,
+                     nombre, cod_cbc, signo, fondo, moneda, dd, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (c.niv1, c.niv2, c.niv3, c.niv4, niv5,
+                  c.niv1_desc, c.niv2_desc, c.niv3_desc, c.niv4_desc,
+                  c.nombre, c.cod_cbc, c.signo, c.fondo or None,
+                  c.moneda, c.dd, c.activo))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/plan_cuentas/{id}")
+def actualizar_cuenta(id: int, c: CuentaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE plan_de_cuentas
+                SET niv1=%s, niv1_desc=%s, niv2=%s, niv2_desc=%s,
+                    niv3=%s, niv3_desc=%s, niv4=%s, niv4_desc=%s,
+                    nombre=%s, cod_cbc=%s, signo=%s, fondo=%s,
+                    moneda=%s, dd=%s, activo=%s
+                WHERE id=%s
+            """, (c.niv1, c.niv1_desc, c.niv2, c.niv2_desc,
+                  c.niv3, c.niv3_desc, c.niv4, c.niv4_desc,
+                  c.nombre, c.cod_cbc, c.signo, c.fondo or None,
+                  c.moneda, c.dd, c.activo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/plan_cuentas/{id}")
+def eliminar_cuenta(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM plan_de_cuentas WHERE id=%s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/balance")
+def get_balance(mes: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where_mes = f"AND EXTRACT(MONTH FROM c.fecha)={mes}" if mes else ""
+            cur.execute(f"""
+                SELECT p.niv1, p.niv1_desc, p.niv2, p.niv2_desc, 
+                       p.niv3, p.niv3_desc, p.niv4, p.niv4_desc,
+                       p.niv5, p.nombre, 
+                       COALESCE(SUM(c.importe),0) importe
+                FROM plan_de_cuentas p
+                LEFT JOIN cashflow c ON c.cod_cuenta = p.nombre {where_mes}
+                GROUP BY p.niv1, p.niv1_desc, p.niv2, p.niv2_desc,
+                         p.niv3, p.niv3_desc, p.niv4, p.niv4_desc,
+                         p.niv5, p.nombre
+                ORDER BY p.niv1, p.niv2, p.niv3, p.niv4, p.niv5
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+class PagoIn(BaseModel):
+    fecha: str
+    id_titular: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    ids_operaciones: list[int]
+    medio_pago: str = "TD"
+
+@app.post("/registrar_pago")
+def registrar_pago(p: PagoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
+            total = cur.fetchone()["coalesce"]
+            fecha = date.fromisoformat(p.fecha)
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, true)
+                RETURNING id
+            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+            id_pago = cur.fetchone()["id"]
+            cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
+        conn.commit()
+        return {"ok": True, "id_pago": id_pago, "total": total}
+    finally:
+        conn.close()
+
+class PagoECheqIn(BaseModel):
+    fecha_emision: str
+    fecha_vencimiento: str
+    nro_cheque: str
+    id_titular: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    ids_operaciones: list[int]
+
+@app.post("/registrar_pago_echeq")
+def registrar_pago_echeq(p: PagoECheqIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
+            total = cur.fetchone()["coalesce"]
+            fecha_emision = date.fromisoformat(p.fecha_emision)
+            fecha_vto = date.fromisoformat(p.fecha_vencimiento)
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                RETURNING id
+            """, (fecha_vto.month, fecha_vto, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+            id_cashflow = cur.fetchone()["id"]
+            cur.execute("""
+                INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow)
+                VALUES (%s, %s, %s, 'EMITIDO', %s)
+            """, (p.nro_cheque, fecha_emision, fecha_vto, id_cashflow))
+            cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_cashflow, p.ids_operaciones))
+        conn.commit()
+        return {"ok": True, "id_cashflow": id_cashflow, "total": total}
+    finally:
+        conn.close()
+
+# ==========================================
+# CARGA AUTOMATICA DE COMPROBANTES (FACTUR.IA)
+# ==========================================
+import re
+import tempfile
+import unicodedata
+from datetime import datetime
+from fastapi import UploadFile, File
+import factura_ia
+
+_modelo_ia = None
+def _get_modelo_ia():
+    global _modelo_ia
+    if _modelo_ia is None:
+        _modelo_ia = factura_ia.configurar()
+    return _modelo_ia
+
+def _solo_digitos(texto):
+    return re.sub(r"\D", "", str(texto or ""))
+
+def _norm(texto):
+    t = str(texto or "").strip().lower()
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r"[\"'""«»]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+def _norm_fuerte(texto):
+    return re.sub(r"[^a-z0-9]", "", _norm(texto))
+
+def _sugerir_titulares(razon_social, titulares, limite=5):
+    objetivo = _norm_fuerte(razon_social)
+    if len(objetivo) < 4:
+        return []
+    out = []
+    for t in titulares:
+        for campo in (t.get("nombre"), t.get("razon_social")):
+            nm = _norm_fuerte(campo)
+            if nm and (nm == objetivo or (len(nm) >= 5 and (nm in objetivo or objetivo in nm))):
+                out.append({"id": t["id"], "nombre": t["nombre"],
+                            "cuit": t.get("cuit_norm"), "plazo_pago": t["plazo_pago"]})
+                break
+        if len(out) >= limite:
+            break
+    return out
+
+def _match_titular(cuit, titulares):
+    cuit_norm = _solo_digitos(cuit)
+    if not cuit_norm:
+        return None
+    for t in titulares:
+        if t["cuit_norm"] and t["cuit_norm"] == cuit_norm:
+            return t
+    return None
+
+def _match_tipo(descripcion, tipos):
+    d = _norm(descripcion)
+    if not d:
+        return None
+    for t in tipos:
+        if _norm(t["descripcion"]) == d:
+            return t["id"]
+    for t in tipos:
+        td = _norm(t["descripcion"])
+        if td and (td in d or d in td):
+            return t["id"]
+    letra_m = re.search(r"\b([abcm])\b", d)
+    letra = letra_m.group(1) if letra_m else None
+    if "credito" in d:
+        clase = "nota de credito"
+    elif "debito" in d:
+        clase = "nota de debito"
+    elif "recibo" in d:
+        clase = "recibo"
+    elif "factura" in d:
+        clase = "factura"
+    elif "tique" in d or "ticket" in d:
+        clase = "tique"
+    elif "remito" in d:
+        clase = "remito"
+    else:
+        return None
+    objetivo = f"{clase} {letra}" if letra else clase
+    for t in tipos:
+        if _norm(t["descripcion"]) == objetivo:
+            return t["id"]
+    for t in tipos:
+        if _norm(t["descripcion"]).startswith(clase):
+            return t["id"]
+    return None
+
+def _imputar_items(items, id_titular, reglas):
+    salida = []
+    for it in items or []:
+        prod = _norm(it.get("producto"))
+        cuenta = None
+        if id_titular:
+            for r in reglas:
+                if r["patron"] == prod and r["id_titular"] == str(id_titular):
+                    cuenta = r["cod_cuenta"]; break
+        if cuenta is None:
+            for r in reglas:
+                if r["patron"] == prod and not r["id_titular"]:
+                    cuenta = r["cod_cuenta"]; break
+        salida.append({
+            "producto": it.get("producto"),
+            "cantidad": it.get("cantidad"),
+            "precio_unitario": it.get("precio_unitario"),
+            "total_linea": it.get("total_linea"),
+            "cod_cuenta": cuenta,
+        })
+    return salida
+
+def _convertir_fecha_iso(fecha_str):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(str(fecha_str).strip(), fmt).date().isoformat()
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+@app.post("/facturas/analizar")
+async def analizar_facturas(archivos: list[UploadFile] = File(...)):
+    model = _get_modelo_ia()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, regexp_replace(COALESCE(cuit,''), '\\D', '', 'g') AS cuit_norm,
+                       nombre, razon_social, plazo_pago, fondo_def
+                FROM titulares
+            """)
+            titulares = cur.fetchall()
+            cur.execute("SELECT id, descripcion FROM tipos_comprobante WHERE activo = true")
+            tipos = cur.fetchall()
+            cur.execute("SELECT lower(patron_producto) AS patron, id_titular, cod_cuenta FROM imputacion_producto")
+            reglas = cur.fetchall()
+
+        resultados = []
+        vistos = set()
+        for archivo in archivos:
+            contenido = await archivo.read()
+            suf = os.path.splitext(archivo.filename or "")[1] or ".pdf"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suf) as tmp:
+                tmp.write(contenido)
+                ruta_tmp = tmp.name
+            try:
+                datos = factura_ia.analizar(ruta_tmp, model)
+            except Exception as e:
+                resultados.append({"archivo": archivo.filename, "estado": "ERROR_LECTURA", "error": str(e)[:200]})
+                continue
+            finally:
+                try: os.unlink(ruta_tmp)
+                except Exception: pass
+
+            cab = datos.get("cabecera", {}) or {}
+            titular = _match_titular(cab.get("cuit"), titulares)
+            id_titular = titular["id"] if titular else None
+            id_tipo = _match_tipo(cab.get("tipo_comprobante"), tipos)
+            numero = str(cab.get("numero_comprobante", "") or "")
+            num_norm = _solo_digitos(numero)
+            sugerencias = _sugerir_titulares(cab.get("razon_social"), titulares) if id_titular is None else []
+
+            duplicado = False
+            candidatos = [id_titular] if id_titular else [s["id"] for s in sugerencias]
+            if num_norm and candidatos:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT 1 FROM operaciones
+                        WHERE id_titular = ANY(%s)
+                          AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
+                        LIMIT 1
+                    """, (candidatos, num_norm))
+                    duplicado = cur.fetchone() is not None
+
+            items = _imputar_items(datos.get("items", []), id_titular, reglas)
+
+            proveedor_key = _solo_digitos(cab.get("cuit")) or _norm_fuerte(cab.get("razon_social"))
+            clave_lote = (proveedor_key, num_norm)
+            dup_en_lote = bool(num_norm) and clave_lote in vistos
+            if num_norm:
+                vistos.add(clave_lote)
+
+            if duplicado or dup_en_lote:
+                estado = "DUPLICADO"
+            elif id_titular is None:
+                estado = "FALTA_TITULAR"
+            else:
+                estado = "LISTO"
+
+            resultados.append({
+                "archivo": archivo.filename,
+                "estado": estado,
+                "razon_social": cab.get("razon_social"),
+                "cuit": cab.get("cuit"),
+                "fecha": _convertir_fecha_iso(cab.get("fecha")),
+                "tipo_comprobante": cab.get("tipo_comprobante"),
+                "id_tipo_comprobante": id_tipo,
+                "numero_comprobante": numero,
+                "total": cab.get("total"),
+                "id_titular": id_titular,
+                "titular_nombre": titular["nombre"] if titular else None,
+                "plazo_pago": titular["plazo_pago"] if titular else None,
+                "sugerencias": sugerencias,
+                "items": items,
+            })
+        return resultados
+    finally:
+        conn.close()
+
+
+class TitularNuevoIn(BaseModel):
+    nombre: str
+    cuit: str
+    razon_social: Optional[str] = None
+    plazo_pago: int
+    nivel1: str = "Proveedores"
+    tipo_titular: str = "PROVEEDOR"
+
+@app.post("/facturas/titular")
+def crear_titular_factura(t: TitularNuevoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO titulares (nombre, razon_social, cuit, nivel1, tipo_titular, plazo_pago, activo)
+                VALUES (%s, %s, %s, %s, %s, %s, true)
+                RETURNING id
+            """, (t.nombre, t.razon_social or t.nombre, _solo_digitos(t.cuit),
+                  t.nivel1, t.tipo_titular, t.plazo_pago))
+            nuevo_id = cur.fetchone()["id"]
+        conn.commit()
+        return {"ok": True, "id": nuevo_id, "nombre": t.nombre, "plazo_pago": t.plazo_pago}
+    finally:
+        conn.close()
+
+class VincularTitularIn(BaseModel):
+    cuit: str
+    razon_social: Optional[str] = None
+    plazo_pago: Optional[int] = None
+
+@app.post("/facturas/titular/{id}/vincular")
+def vincular_titular_factura(id: str, v: VincularTitularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if v.plazo_pago is not None:
+                cur.execute("""
+                    UPDATE titulares
+                    SET cuit=%s,
+                        razon_social=COALESCE(NULLIF(razon_social,''), %s),
+                        plazo_pago=%s
+                    WHERE id=%s
+                    RETURNING id, nombre, plazo_pago
+                """, (_solo_digitos(v.cuit), v.razon_social, v.plazo_pago, id))
+            else:
+                cur.execute("""
+                    UPDATE titulares
+                    SET cuit=%s,
+                        razon_social=COALESCE(NULLIF(razon_social,''), %s)
+                    WHERE id=%s
+                    RETURNING id, nombre, plazo_pago
+                """, (_solo_digitos(v.cuit), v.razon_social, id))
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return {"ok": False, "error": "Titular no encontrado"}
+        return {"ok": True, "id": row["id"], "nombre": row["nombre"], "plazo_pago": row["plazo_pago"]}
+    finally:
+        conn.close()
+
+@app.delete("/titulares/{id}")
+def eliminar_titular(id: str):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM titulares WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/cashflow/{id}")
+def eliminar_cashflow(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
+            cur.execute("DELETE FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
+            cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+class CashflowUpdateIn(BaseModel):
+    importe: float
+
+@app.put("/cashflow/{id}")
+def actualizar_cashflow(id: int, c: CashflowUpdateIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE cashflow SET importe=%s WHERE id=%s", (c.importe, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/operaciones/{id}")
+def eliminar_operacion(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+class ItemFacturaIn(BaseModel):
+    producto: Optional[str] = None
+    cantidad: Optional[float] = None
+    precio_unitario: Optional[float] = None
+    total_linea: Optional[float] = None
+    cod_cuenta: Optional[str] = None
+
+class FacturaGuardarIn(BaseModel):
+    fecha: str
+    id_titular: str
+    id_tipo_comprobante: Optional[int] = None
+    numero_comprobante: str = ""
+    descripcion: str = ""
+    importe: float
+    id_fondo: Optional[int] = None
+    fecha_vencimiento: Optional[str] = None
+    items: list[ItemFacturaIn] = []
+
+@app.post("/facturas/guardar")
+def guardar_factura(c: FacturaGuardarIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(c.fecha)
+            id_tipo = c.id_tipo_comprobante or 999
+            id_titular = str(c.id_titular)
+
+            num_norm = _solo_digitos(c.numero_comprobante)
+            if num_norm:
+                cur.execute("""
+                    SELECT id FROM operaciones
+                    WHERE id_titular = %s
+                      AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
+                    LIMIT 1
+                """, (id_titular, num_norm))
+                existe = cur.fetchone()
+                if existe:
+                    return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
+
+            cur.execute("""
+                INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (fecha, id_titular, id_tipo, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
+            id_operacion = cur.fetchone()["id"]
+
+            plazo = None
+            if not c.fecha_vencimiento:
+                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (id_titular,))
+                row = cur.fetchone()
+                if row and row["plazo_pago"] and row["plazo_pago"] > 0:
+                    plazo = row["plazo_pago"]
+            fecha_vto = None
+            if c.fecha_vencimiento or plazo:
+                fecha_vto = date.fromisoformat(c.fecha_vencimiento) if c.fecha_vencimiento else fecha + timedelta(days=plazo)
+                id_fondo = c.id_fondo
+                if not id_fondo:
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (id_titular,))
+                    r = cur.fetchone()
+                    if r and r["fondo_def"]:
+                        id_fondo = r["fondo_def"]
+                if id_fondo:
+                    cur.execute("""
+                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                    """, (fecha_vto.month, fecha_vto, id_titular, c.descripcion, -abs(c.importe), id_fondo, id_operacion))
+
+            for it in c.items:
+                cur.execute("""
+                    INSERT INTO operaciones_items (id_operacion, producto, cantidad, precio_unitario, total_linea, cod_cuenta)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (id_operacion, it.producto, it.cantidad, it.precio_unitario, it.total_linea, it.cod_cuenta))
+
+                if it.cod_cuenta and it.producto:
+                    cur.execute("""
+                        INSERT INTO imputacion_producto (patron_producto, id_titular, cod_cuenta)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (lower(patron_producto), COALESCE(id_titular, ''))
+                        DO UPDATE SET cod_cuenta = EXCLUDED.cod_cuenta, creado_en = now()
+                    """, (it.producto, id_titular, it.cod_cuenta))
+
+        conn.commit()
+        return {
+            "ok": True,
+            "id_operacion": id_operacion,
+            "items_guardados": len(c.items),
+            "fecha_vencimiento": str(fecha_vto) if fecha_vto else None,
+        }
+    finally:
+        conn.close()
+
+@app.get("/proyeccion_alerta")
+def get_proyeccion_alerta():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.id, f.nombre, f.abrev, f.slot, f.moneda,
+                       f.saldo_inicial +
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0)
+                       AS saldo_actual
+                FROM fondos f
+                LEFT JOIN cashflow c ON c.id_fondo = f.id
+                WHERE f.slot IS NOT NULL AND f.activo = true AND f.moneda = 'ARS'
+                GROUP BY f.id, f.nombre, f.abrev, f.slot, f.moneda, f.saldo_inicial
+                ORDER BY f.orden
+            """)
+            fondos = cur.fetchall()
+
+            cur.execute("""
+                SELECT c.id_fondo, c.fecha, SUM(c.importe) as total
+                FROM cashflow c
+                JOIN fondos f ON c.id_fondo = f.id
+                WHERE c.fecha > CURRENT_DATE
+                  AND f.moneda = 'ARS'
+                  AND f.slot IS NOT NULL
+                GROUP BY c.id_fondo, c.fecha
+                ORDER BY c.fecha ASC
+            """)
+            movimientos = cur.fetchall()
+
+        mov_por_fondo = defaultdict(list)
+        for m in movimientos:
+            mov_por_fondo[m["id_fondo"]].append(m)
+
+        primer_rojo_por_fondo = {}
+        for f in fondos:
+            saldo = float(f["saldo_actual"])
+            for m in mov_por_fondo[f["id"]]:
+                saldo += float(m["total"])
+                if saldo < 0:
+                    primer_rojo_por_fondo[f["id"]] = {
+                        "fecha": str(m["fecha"]),
+                        "saldo": round(saldo, 1)
+                    }
+                    break
+
+        saldo_total = sum(float(f["saldo_actual"]) for f in fondos)
+        todas_fechas = sorted(set(str(m["fecha"]) for m in movimientos))
+        primer_rojo_total = None
+        for fecha in todas_fechas:
+            for f in fondos:
+                for m in mov_por_fondo[f["id"]]:
+                    if str(m["fecha"]) == fecha:
+                        saldo_total += float(m["total"])
+            if saldo_total < 0 and primer_rojo_total is None:
+                primer_rojo_total = {
+                    "fecha": fecha,
+                    "saldo": round(saldo_total, 1)
+                }
+                break
+
+        return {
+            "primer_rojo_total": primer_rojo_total,
+            "primer_rojo_por_fondo": primer_rojo_por_fondo
+        }
+    finally:
+        conn.close()
