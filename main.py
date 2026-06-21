@@ -182,6 +182,7 @@ def actualizar_titular(id: str, t: TitularIn):
         return {"ok": True}
     finally:
         conn.close()
+
 @app.get("/cuentas")
 def get_cuentas():
     conn = get_conn()
@@ -205,7 +206,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
-                       c.confirmado,
+                       c.confirmado, c.id_concepto,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
                        ch.estado AS estado_cheque
                 FROM cashflow c
@@ -287,6 +288,7 @@ class MovimientoIn(BaseModel):
     cod_cuenta: str
     detalle: str
     importe: float
+    id_concepto: Optional[int] = None
 
 @app.post("/cashflow")
 def crear_movimiento(m: MovimientoIn):
@@ -296,9 +298,9 @@ def crear_movimiento(m: MovimientoIn):
             fecha = date.fromisoformat(m.fecha)
             confirmado = fecha <= date.today()
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado))
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_concepto)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado, m.id_concepto))
         conn.commit()
         return {"ok": True}
     finally:
@@ -462,6 +464,68 @@ def get_plan_cuentas():
                 ORDER BY niv1,niv2,niv3,niv4,niv5
             """)
             return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/conceptos_movimiento")
+def get_conceptos_movimiento():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, codigo_legacy, nombre, cod_cuenta, tipo, activo
+                FROM conceptos_movimiento
+                WHERE activo = true
+                ORDER BY tipo, nombre
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+class ConceptoIn(BaseModel):
+    codigo_legacy: Optional[str] = None
+    nombre: str
+    cod_cuenta: str
+    tipo: str
+    activo: Optional[bool] = True
+
+@app.post("/conceptos_movimiento")
+def crear_concepto(c: ConceptoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO conceptos_movimiento (codigo_legacy, nombre, cod_cuenta, tipo, activo)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (c.codigo_legacy, c.nombre, c.cod_cuenta, c.tipo, c.activo))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/conceptos_movimiento/{id}")
+def actualizar_concepto(id: int, c: ConceptoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE conceptos_movimiento
+                SET codigo_legacy=%s, nombre=%s, cod_cuenta=%s, tipo=%s, activo=%s
+                WHERE id=%s
+            """, (c.codigo_legacy, c.nombre, c.cod_cuenta, c.tipo, c.activo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/conceptos_movimiento/{id}")
+def eliminar_concepto(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM conceptos_movimiento WHERE id=%s", (id,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -943,6 +1007,7 @@ def eliminar_cashflow(id: int):
         return {"ok": True}
     finally:
         conn.close()
+
 class CashflowUpdateIn(BaseModel):
     importe: float
 
@@ -956,6 +1021,7 @@ def actualizar_cashflow(id: int, c: CashflowUpdateIn):
         return {"ok": True}
     finally:
         conn.close()
+
 @app.delete("/operaciones/{id}")
 def eliminar_operacion(id: int):
     conn = get_conn()
