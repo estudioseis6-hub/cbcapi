@@ -422,6 +422,19 @@ def crear_comprobante(c: ComprobanteIn):
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
             fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
+
+            num_norm = _solo_digitos(c.numero_comprobante)
+            if num_norm:
+                cur.execute("""
+                    SELECT id FROM operaciones
+                    WHERE id_titular = %s
+                      AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
+                    LIMIT 1
+                """, (str(c.id_titular), num_norm))
+                existe = cur.fetchone()
+                if existe:
+                    return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
+
             importe = (
                 (c.subtotal or 0) + (c.exento or 0)
                 + (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
