@@ -206,8 +206,8 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
                 where.append(f"c.id_fondo={id_fondo}")
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
-                       c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
-                       c.confirmado, c.id_operacion,
+       c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
+       c.confirmado, c.id_operacion, c.id_titular,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
                        ch.estado AS estado_cheque
                 FROM cashflow c
