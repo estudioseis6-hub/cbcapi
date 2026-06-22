@@ -239,10 +239,10 @@ def get_vencimientos():
             cur.execute("""
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe, c.id_operacion, c.id_titular
-                FROM cashflow c
-                LEFT JOIN titulares t ON c.id_titular = t.id
-                LEFT JOIN fondos f ON c.id_fondo = f.id
-                WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
+FROM cashflow c
+LEFT JOIN titulares t ON c.id_titular = t.id
+LEFT JOIN fondos f ON c.id_fondo = f.id
+WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
                 ORDER BY c.fecha ASC
             """)
             return {"vencimientos": cur.fetchall(), "movidos": movidos}
