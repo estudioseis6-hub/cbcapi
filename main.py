@@ -207,7 +207,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
-                       c.confirmado,
+                       c.confirmado, c.id_operacion,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
                        ch.estado AS estado_cheque
                 FROM cashflow c
@@ -238,7 +238,7 @@ def get_vencimientos():
             conn.commit()
             cur.execute("""
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
-                       c.detalle, c.importe
+                       c.detalle, c.importe, c.id_operacion, c.id_titular
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
                 LEFT JOIN fondos f ON c.id_fondo = f.id
@@ -636,6 +636,19 @@ def registrar_pago(p: PagoIn):
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
+
+            # Buscar cashflows proyectados existentes para estas operaciones
+            cur.execute("""
+                SELECT id FROM cashflow
+                WHERE id_operacion = ANY(%s) AND confirmado = false
+            """, (p.ids_operaciones,))
+            proyectados = [r["id"] for r in cur.fetchall()]
+
+            # Eliminar los proyectados individuales (los consolidamos en uno solo)
+            if proyectados:
+                cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
+
+            # Crear un único cashflow consolidado confirmado
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, true)
@@ -667,6 +680,19 @@ def registrar_pago_echeq(p: PagoECheqIn):
             total = cur.fetchone()["coalesce"]
             fecha_emision = date.fromisoformat(p.fecha_emision)
             fecha_vto = date.fromisoformat(p.fecha_vencimiento)
+
+            # Buscar cashflows proyectados existentes para estas operaciones
+            cur.execute("""
+                SELECT id FROM cashflow
+                WHERE id_operacion = ANY(%s) AND confirmado = false
+            """, (p.ids_operaciones,))
+            proyectados = [r["id"] for r in cur.fetchall()]
+
+            # Eliminar los proyectados individuales (los consolidamos en uno solo)
+            if proyectados:
+                cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
+
+            # Crear un único cashflow consolidado como ECheq (confirmado=false hasta el débito)
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, false)
