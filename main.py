@@ -207,7 +207,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
-                       c.confirmado,
+                       c.confirmado, c.id_operacion, c.id_titular,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
                        ch.estado AS estado_cheque
                 FROM cashflow c
@@ -704,10 +704,6 @@ def registrar_pago_echeq(p: PagoECheqIn):
                 VALUES (%s, %s, %s, 'EMITIDO', %s)
             """, (p.nro_cheque, fecha_emision, fecha_vto, id_cashflow))
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_cashflow, p.ids_operaciones))
-        conn.commit()
-        return {"ok": True, "id_cashflow": id_cashflow, "total": total}
-    finally:
-        conn.close()
         conn.commit()
         return {"ok": True, "id_cashflow": id_cashflow, "total": total}
     finally:
