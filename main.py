@@ -1154,6 +1154,7 @@ def guardar_manual(m: ManualIn):
         return {"ok": True}
     finally:
         conn.close()
+@app.get("/proyeccion_alerta")
 def get_proyeccion_alerta():
     conn = get_conn()
     try:
