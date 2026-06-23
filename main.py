@@ -966,7 +966,7 @@ def vincular_titular_factura(id: str, v: VincularTitularIn):
                 """, (_solo_digitos(v.cuit), v.razon_social, v.plazo_pago, id))
             else:
                 cur.execute("""
-                    UPDATE titulares
+                    UPDATE titulares 
                     SET cuit=%s,
                         razon_social=COALESCE(NULLIF(razon_social,''), %s)
                     WHERE id=%s
