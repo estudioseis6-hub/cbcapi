@@ -966,7 +966,7 @@ def vincular_titular_factura(id: str, v: VincularTitularIn):
                 """, (_solo_digitos(v.cuit), v.razon_social, v.plazo_pago, id))
             else:
                 cur.execute("""
-                    UPDATE titulares 
+                    UPDATE titulares
                     SET cuit=%s,
                         razon_social=COALESCE(NULLIF(razon_social,''), %s)
                     WHERE id=%s
@@ -1125,7 +1125,35 @@ def guardar_factura(c: FacturaGuardarIn):
     finally:
         conn.close()
 
-@app.get("/proyeccion_alerta")
+@app.get("/manual")
+def get_manual():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT contenido, actualizado_en FROM manual_cbc ORDER BY id LIMIT 1")
+            row = cur.fetchone()
+            return row if row else {"contenido": "", "actualizado_en": None}
+    finally:
+        conn.close()
+
+class ManualIn(BaseModel):
+    contenido: str
+
+@app.put("/manual")
+def guardar_manual(m: ManualIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM manual_cbc LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                cur.execute("UPDATE manual_cbc SET contenido=%s, actualizado_en=now() WHERE id=%s", (m.contenido, row["id"]))
+            else:
+                cur.execute("INSERT INTO manual_cbc (contenido) VALUES (%s)", (m.contenido,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
 def get_proyeccion_alerta():
     conn = get_conn()
     try:
