@@ -637,18 +637,15 @@ def registrar_pago(p: PagoIn):
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
 
-            # Buscar cashflows proyectados existentes para estas operaciones
             cur.execute("""
                 SELECT id FROM cashflow
                 WHERE id_operacion = ANY(%s) AND confirmado = false
             """, (p.ids_operaciones,))
             proyectados = [r["id"] for r in cur.fetchall()]
 
-            # Eliminar los proyectados individuales (los consolidamos en uno solo)
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
 
-            # Crear un único cashflow consolidado confirmado
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, true)
@@ -681,18 +678,15 @@ def registrar_pago_echeq(p: PagoECheqIn):
             fecha_emision = date.fromisoformat(p.fecha_emision)
             fecha_vto = date.fromisoformat(p.fecha_vencimiento)
 
-            # Buscar cashflows proyectados existentes para estas operaciones
             cur.execute("""
                 SELECT id FROM cashflow
                 WHERE id_operacion = ANY(%s) AND confirmado = false
             """, (p.ids_operaciones,))
             proyectados = [r["id"] for r in cur.fetchall()]
 
-            # Eliminar los proyectados individuales (los consolidamos en uno solo)
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
 
-            # Crear un único cashflow consolidado como ECheq (confirmado=false hasta el débito)
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, false)
@@ -733,7 +727,7 @@ def _norm(texto):
     t = str(texto or "").strip().lower()
     t = unicodedata.normalize("NFKD", t)
     t = "".join(c for c in t if not unicodedata.combining(c))
-    t = re.sub(r"[\"'""«»]", " ", t)
+    t = re.sub(r"[\"'\u201c\u201d\u00ab\u00bb]", " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 def _norm_fuerte(texto):
@@ -996,8 +990,11 @@ def eliminar_cashflow(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Bloquear eliminacion si es un ECheq
+            cur.execute("SELECT id FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
+            if cur.fetchone():
+                return {"ok": False, "error": "Los ECheqs no se pueden eliminar. Para anular un cheque usa la funcion de anulacion."}
             cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
-            cur.execute("DELETE FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
             cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
@@ -1154,6 +1151,7 @@ def guardar_manual(m: ManualIn):
         return {"ok": True}
     finally:
         conn.close()
+
 @app.get("/proyeccion_alerta")
 def get_proyeccion_alerta():
     conn = get_conn()
