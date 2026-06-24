@@ -19,6 +19,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# CIRCUITO F: endpoints en archivo aparte (circuito_f.py) para que no se pisen
+# al editar main.py. NO BORRAR estas dos lineas.
+from circuito_f import router as circuito_f_router
+app.include_router(circuito_f_router)
+
 import os
 DB = os.environ.get("DATABASE_URL")
 
