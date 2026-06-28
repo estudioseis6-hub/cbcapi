@@ -54,7 +54,7 @@ def get_fondos():
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
                        f.saldo_inicial, f.slot, f.abrev, f.grupo,
                        COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS movimientos,
-COALESCE(SUM(CASE WHEN c.fecha > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS proyectado
+                       COALESCE(SUM(CASE WHEN c.fecha > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS proyectado
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.slot IS NOT NULL
@@ -248,11 +248,11 @@ def get_vencimientos():
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE cashflow
-SET fecha = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date,
-    mes = EXTRACT(MONTH FROM (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'))::integer
-WHERE confirmado = false
-AND fecha < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
-AND id NOT IN (SELECT id_cashflow FROM cheques_emitidos WHERE id_cashflow IS NOT NULL)
+                SET fecha = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date,
+                    mes = EXTRACT(MONTH FROM (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'))::integer
+                WHERE confirmado = false
+                AND fecha < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                AND id NOT IN (SELECT id_cashflow FROM cheques_emitidos WHERE id_cashflow IS NOT NULL)
             """)
             movidos = cur.rowcount
             conn.commit()
@@ -500,8 +500,19 @@ def crear_comprobante(c: ComprobanteIn):
                 conn.commit()
                 return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto)}
             else:
+                fecha_vto = fecha + timedelta(days=30)
+                id_fondo = c.id_fondo
+                if not id_fondo:
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
+                    r = cur.fetchone()
+                    id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
+                if id_fondo:
+                    cur.execute("""
+                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
                 conn.commit()
-                return {"ok": True, "id_operacion": id_operacion, "proyectado": False, "sin_plazo": True}
+                return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": True}
     finally:
         conn.close()
 
@@ -1082,6 +1093,7 @@ def eliminar_operacion(id: int):
         return {"ok": True}
     finally:
         conn.close()
+
 class ItemFacturaIn(BaseModel):
     producto: Optional[str] = None
     cantidad: Optional[float] = None
