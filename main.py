@@ -401,6 +401,7 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             sql = """
                 SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo,
                        o.numero_comprobante numero, o.descripcion concepto, o.importe,
+                       o.es_informal,
                        CASE WHEN o.id_pago IS NULL THEN 'IMPAGO' ELSE 'PAGO' END estado
                 FROM operaciones o
                 LEFT JOIN titulares t ON o.id_titular = t.id
@@ -441,6 +442,9 @@ def crear_comprobante(c: ComprobanteIn):
             fecha = date.fromisoformat(c.fecha)
             fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
 
+            # Determinar si es informal
+            es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) > 0)
+
             num_norm = _solo_digitos(c.numero_comprobante)
             if num_norm:
                 cur.execute("""
@@ -459,24 +463,37 @@ def crear_comprobante(c: ComprobanteIn):
                 + (c.perc_iva or 0) + (c.perc_iibb or 0) + (c.perc_otras or 0)
                 + (c.sin_factura or 0)
             )
+
             cur.execute("""
                 INSERT INTO operaciones
                     (fecha, fecha_compra, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes,
-                     subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura, es_informal)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
-                  c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura))
+                  c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal))
             id_operacion = cur.fetchone()["id"]
 
             # Determinar fondo
             id_fondo = c.id_fondo
-            if not id_fondo:
-                cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
-                r = cur.fetchone()
-                id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
+            if id_fondo:
+                # Validar que si es informal el fondo sea efectivo
+                cur.execute("SELECT tipo FROM fondos WHERE id = %s", (id_fondo,))
+                fondo_row = cur.fetchone()
+                if es_informal and fondo_row and fondo_row["tipo"] != "Efectivo":
+                    conn.commit()
+                    return {"ok": False, "error_fondo_informal": True}
+            else:
+                if es_informal:
+                    # Buscar primer fondo efectivo ARS activo
+                    cur.execute("SELECT id FROM fondos WHERE tipo = 'Efectivo' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
+                    r = cur.fetchone()
+                    id_fondo = r["id"] if r else None
+                else:
+                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
+                    r = cur.fetchone()
+                    id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
 
-            # Sin fondo: no se puede proyectar
             if not id_fondo:
                 conn.commit()
                 return {"ok": False, "sin_fondo": True}
@@ -505,7 +522,7 @@ def crear_comprobante(c: ComprobanteIn):
             """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
 
             conn.commit()
-            return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo}
+            return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal}
     finally:
         conn.close()
 
@@ -657,6 +674,14 @@ def registrar_pago(p: PagoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Validar que informales no paguen con fondos electronicos
+            cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
+            if cur.fetchone():
+                cur.execute("SELECT tipo FROM fondos WHERE id = %s", (p.id_fondo,))
+                fondo_row = cur.fetchone()
+                if fondo_row and fondo_row["tipo"] != "Efectivo":
+                    return {"ok": False, "error_fondo_informal": True}
+
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
@@ -694,6 +719,11 @@ def registrar_pago_echeq(p: PagoECheqIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Informales nunca pueden pagarse con ECheq
+            cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
+            if cur.fetchone():
+                return {"ok": False, "error_fondo_informal": True}
+
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha_emision = date.fromisoformat(p.fecha_emision)
