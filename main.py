@@ -53,8 +53,8 @@ def get_fondos():
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
                        f.saldo_inicial, f.slot, f.abrev, f.grupo,
-                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS movimientos,
-                       COALESCE(SUM(CASE WHEN c.fecha > CURRENT_DATE THEN c.importe ELSE 0 END), 0) AS proyectado
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS movimientos,
+COALESCE(SUM(CASE WHEN c.fecha > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS proyectado
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 WHERE f.slot IS NOT NULL
@@ -248,9 +248,11 @@ def get_vencimientos():
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE cashflow
-                SET fecha = CURRENT_DATE, mes = EXTRACT(MONTH FROM CURRENT_DATE)::integer
-                WHERE confirmado = false AND fecha < CURRENT_DATE
-                AND id NOT IN (SELECT id_cashflow FROM cheques_emitidos WHERE id_cashflow IS NOT NULL)
+SET fecha = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date,
+    mes = EXTRACT(MONTH FROM (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'))::integer
+WHERE confirmado = false
+AND fecha < (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+AND id NOT IN (SELECT id_cashflow FROM cheques_emitidos WHERE id_cashflow IS NOT NULL)
             """)
             movidos = cur.rowcount
             conn.commit()
@@ -260,7 +262,7 @@ def get_vencimientos():
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
                 LEFT JOIN fondos f ON c.id_fondo = f.id
-                WHERE c.confirmado = false AND c.fecha <= CURRENT_DATE
+                WHERE c.confirmado = false AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
                 ORDER BY c.fecha ASC
             """)
             return {"vencimientos": cur.fetchall(), "movidos": movidos}
@@ -1209,7 +1211,7 @@ def get_proyeccion_alerta():
             cur.execute("""
                 SELECT f.id, f.nombre, f.abrev, f.slot, f.moneda,
                        f.saldo_inicial +
-                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= CURRENT_DATE THEN c.importe ELSE 0 END), 0)
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0)
                        AS saldo_actual
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
@@ -1223,7 +1225,7 @@ def get_proyeccion_alerta():
                 SELECT c.id_fondo, c.fecha, SUM(c.importe) as total
                 FROM cashflow c
                 JOIN fondos f ON c.id_fondo = f.id
-                WHERE c.fecha > CURRENT_DATE
+                WHERE c.fecha > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
                   AND f.moneda = 'ARS'
                   AND f.slot IS NOT NULL
                 GROUP BY c.id_fondo, c.fecha
