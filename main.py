@@ -225,7 +225,8 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
                        c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
                        c.confirmado, c.id_operacion, c.id_titular,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
-                       ch.estado AS estado_cheque
+                       ch.estado AS estado_cheque,
+           EXISTS(SELECT 1 FROM operaciones o WHERE o.id_pago = c.id) AS cancela_cc
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
                 LEFT JOIN fondos f ON c.id_fondo = f.id
