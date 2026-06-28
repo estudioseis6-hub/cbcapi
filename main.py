@@ -19,8 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# CIRCUITO F: endpoints en archivo aparte (circuito_f.py) para que no se pisen
-# al editar main.py. NO BORRAR estas dos lineas.
 from circuito_f import router as circuito_f_router
 app.include_router(circuito_f_router)
 
@@ -471,6 +469,19 @@ def crear_comprobante(c: ComprobanteIn):
                   c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura))
             id_operacion = cur.fetchone()["id"]
 
+            # Determinar fondo
+            id_fondo = c.id_fondo
+            if not id_fondo:
+                cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
+                r = cur.fetchone()
+                id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
+
+            # Sin fondo: no se puede proyectar
+            if not id_fondo:
+                conn.commit()
+                return {"ok": False, "sin_fondo": True}
+
+            # Determinar fecha de vencimiento
             plazo = None
             if not c.fecha_vencimiento:
                 cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
@@ -478,41 +489,23 @@ def crear_comprobante(c: ComprobanteIn):
                 if row and row["plazo_pago"] and row["plazo_pago"] > 0:
                     plazo = row["plazo_pago"]
 
-            if c.fecha_vencimiento or plazo:
-                if c.fecha_vencimiento:
-                    fecha_vto = date.fromisoformat(c.fecha_vencimiento)
-                else:
-                    fecha_vto = fecha + timedelta(days=plazo)
-
-                id_fondo = c.id_fondo
-                if not id_fondo:
-                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
-                    r = cur.fetchone()
-                    if r and r["fondo_def"]:
-                        id_fondo = r["fondo_def"]
-
-                if id_fondo:
-                    cur.execute("""
-                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-                    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
-
-                conn.commit()
-                return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto)}
+            if c.fecha_vencimiento:
+                fecha_vto = date.fromisoformat(c.fecha_vencimiento)
+                sin_plazo = False
+            elif plazo:
+                fecha_vto = fecha + timedelta(days=plazo)
+                sin_plazo = False
             else:
                 fecha_vto = fecha + timedelta(days=30)
-                id_fondo = c.id_fondo
-                if not id_fondo:
-                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
-                    r = cur.fetchone()
-                    id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
-                if id_fondo:
-                    cur.execute("""
-                        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-                    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
-                conn.commit()
-                return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": True}
+                sin_plazo = True
+
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+            """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
+
+            conn.commit()
+            return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo}
     finally:
         conn.close()
 
@@ -667,16 +660,13 @@ def registrar_pago(p: PagoIn):
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
-
             cur.execute("""
                 SELECT id FROM cashflow
                 WHERE id_operacion = ANY(%s) AND confirmado = false
             """, (p.ids_operaciones,))
             proyectados = [r["id"] for r in cur.fetchall()]
-
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
-
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, true)
@@ -708,16 +698,13 @@ def registrar_pago_echeq(p: PagoECheqIn):
             total = cur.fetchone()["coalesce"]
             fecha_emision = date.fromisoformat(p.fecha_emision)
             fecha_vto = date.fromisoformat(p.fecha_vencimiento)
-
             cur.execute("""
                 SELECT id FROM cashflow
                 WHERE id_operacion = ANY(%s) AND confirmado = false
             """, (p.ids_operaciones,))
             proyectados = [r["id"] for r in cur.fetchall()]
-
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
-
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, false)
@@ -910,7 +897,6 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
                     duplicado = cur.fetchone() is not None
 
             items = _imputar_items(datos.get("items", []), id_titular, reglas)
-
             proveedor_key = _solo_digitos(cab.get("cuit")) or _norm_fuerte(cab.get("razon_social"))
             clave_lote = (proveedor_key, num_norm)
             dup_en_lote = bool(num_norm) and clave_lote in vistos
@@ -943,7 +929,6 @@ async def analizar_facturas(archivos: list[UploadFile] = File(...)):
         return resultados
     finally:
         conn.close()
-
 
 class TitularNuevoIn(BaseModel):
     nombre: str
@@ -1166,7 +1151,6 @@ def guardar_factura(c: FacturaGuardarIn):
                     INSERT INTO operaciones_items (id_operacion, producto, cantidad, precio_unitario, total_linea, cod_cuenta)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (id_operacion, it.producto, it.cantidad, it.precio_unitario, it.total_linea, it.cod_cuenta))
-
                 if it.cod_cuenta and it.producto:
                     cur.execute("""
                         INSERT INTO imputacion_producto (patron_producto, id_titular, cod_cuenta)
@@ -1232,7 +1216,6 @@ def get_proyeccion_alerta():
                 ORDER BY f.orden
             """)
             fondos = cur.fetchall()
-
             cur.execute("""
                 SELECT c.id_fondo, c.fecha, SUM(c.importe) as total
                 FROM cashflow c
@@ -1255,10 +1238,7 @@ def get_proyeccion_alerta():
             for m in mov_por_fondo[f["id"]]:
                 saldo += float(m["total"])
                 if saldo < 0:
-                    primer_rojo_por_fondo[f["id"]] = {
-                        "fecha": str(m["fecha"]),
-                        "saldo": round(saldo, 1)
-                    }
+                    primer_rojo_por_fondo[f["id"]] = {"fecha": str(m["fecha"]), "saldo": round(saldo, 1)}
                     break
 
         saldo_total = sum(float(f["saldo_actual"]) for f in fondos)
@@ -1270,15 +1250,9 @@ def get_proyeccion_alerta():
                     if str(m["fecha"]) == fecha:
                         saldo_total += float(m["total"])
             if saldo_total < 0 and primer_rojo_total is None:
-                primer_rojo_total = {
-                    "fecha": fecha,
-                    "saldo": round(saldo_total, 1)
-                }
+                primer_rojo_total = {"fecha": fecha, "saldo": round(saldo_total, 1)}
                 break
 
-        return {
-            "primer_rojo_total": primer_rojo_total,
-            "primer_rojo_por_fondo": primer_rojo_por_fondo
-        }
+        return {"primer_rojo_total": primer_rojo_total, "primer_rojo_por_fondo": primer_rojo_por_fondo}
     finally:
         conn.close()
