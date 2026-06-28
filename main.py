@@ -1076,12 +1076,12 @@ def eliminar_operacion(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM cashflow WHERE id_operacion = %s AND confirmado = false", (id,))
             cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
         conn.close()
-
 class ItemFacturaIn(BaseModel):
     producto: Optional[str] = None
     cantidad: Optional[float] = None
