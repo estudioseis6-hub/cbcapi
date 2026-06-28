@@ -442,7 +442,6 @@ def crear_comprobante(c: ComprobanteIn):
             fecha = date.fromisoformat(c.fecha)
             fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
 
-            # Determinar si es informal
             es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) > 0)
 
             num_norm = _solo_digitos(c.numero_comprobante)
@@ -474,10 +473,8 @@ def crear_comprobante(c: ComprobanteIn):
                   c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal))
             id_operacion = cur.fetchone()["id"]
 
-            # Determinar fondo
             id_fondo = c.id_fondo
             if id_fondo:
-                # Validar que si es informal el fondo sea efectivo
                 cur.execute("SELECT tipo FROM fondos WHERE id = %s", (id_fondo,))
                 fondo_row = cur.fetchone()
                 if es_informal and fondo_row and fondo_row["tipo"] != "Efectivo":
@@ -485,7 +482,6 @@ def crear_comprobante(c: ComprobanteIn):
                     return {"ok": False, "error_fondo_informal": True}
             else:
                 if es_informal:
-                    # Buscar primer fondo efectivo ARS activo
                     cur.execute("SELECT id FROM fondos WHERE tipo = 'Efectivo' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
                     r = cur.fetchone()
                     id_fondo = r["id"] if r else None
@@ -498,7 +494,6 @@ def crear_comprobante(c: ComprobanteIn):
                 conn.commit()
                 return {"ok": False, "sin_fondo": True}
 
-            # Determinar fecha de vencimiento
             plazo = None
             if not c.fecha_vencimiento:
                 cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
@@ -645,9 +640,9 @@ def get_balance(mes: Optional[int] = None):
         with conn.cursor() as cur:
             where_mes = f"AND EXTRACT(MONTH FROM c.fecha)={mes}" if mes else ""
             cur.execute(f"""
-                SELECT p.niv1, p.niv1_desc, p.niv2, p.niv2_desc, 
+                SELECT p.niv1, p.niv1_desc, p.niv2, p.niv2_desc,
                        p.niv3, p.niv3_desc, p.niv4, p.niv4_desc,
-                       p.niv5, p.nombre, 
+                       p.niv5, p.nombre,
                        COALESCE(SUM(c.importe),0) importe
                 FROM plan_de_cuentas p
                 LEFT JOIN cashflow c ON c.cod_cuenta = p.nombre {where_mes}
@@ -674,7 +669,6 @@ def registrar_pago(p: PagoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Validar que informales no paguen con fondos electronicos
             cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
             if cur.fetchone():
                 cur.execute("SELECT tipo FROM fondos WHERE id = %s", (p.id_fondo,))
@@ -685,10 +679,7 @@ def registrar_pago(p: PagoIn):
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
-            cur.execute("""
-                SELECT id FROM cashflow
-                WHERE id_operacion = ANY(%s) AND confirmado = false
-            """, (p.ids_operaciones,))
+            cur.execute("SELECT id FROM cashflow WHERE id_operacion = ANY(%s) AND confirmado = false", (p.ids_operaciones,))
             proyectados = [r["id"] for r in cur.fetchall()]
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
@@ -719,7 +710,6 @@ def registrar_pago_echeq(p: PagoECheqIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Informales nunca pueden pagarse con ECheq
             cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
             if cur.fetchone():
                 return {"ok": False, "error_fondo_informal": True}
@@ -728,10 +718,7 @@ def registrar_pago_echeq(p: PagoECheqIn):
             total = cur.fetchone()["coalesce"]
             fecha_emision = date.fromisoformat(p.fecha_emision)
             fecha_vto = date.fromisoformat(p.fecha_vencimiento)
-            cur.execute("""
-                SELECT id FROM cashflow
-                WHERE id_operacion = ANY(%s) AND confirmado = false
-            """, (p.ids_operaciones,))
+            cur.execute("SELECT id FROM cashflow WHERE id_operacion = ANY(%s) AND confirmado = false", (p.ids_operaciones,))
             proyectados = [r["id"] for r in cur.fetchall()]
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
@@ -748,6 +735,90 @@ def registrar_pago_echeq(p: PagoECheqIn):
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_cashflow, p.ids_operaciones))
         conn.commit()
         return {"ok": True, "id_cashflow": id_cashflow, "total": total}
+    finally:
+        conn.close()
+
+@app.delete("/operaciones/{id}")
+def eliminar_operacion(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id_pago FROM operaciones WHERE id = %s", (id,))
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error": "Operación no encontrada"}
+            if row["id_pago"] is not None:
+                return {"ok": False, "error_paga": True}
+            cur.execute("DELETE FROM cashflow WHERE id_operacion = %s AND confirmado = false", (id,))
+            cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+class OperacionUpdateIn(BaseModel):
+    fecha: str
+    fecha_compra: Optional[str] = None
+    descripcion: str
+    id_fondo: int
+    fecha_vencimiento: Optional[str] = None
+    subtotal: Optional[float] = 0
+    exento: Optional[float] = 0
+    iva_105: Optional[float] = 0
+    iva_21: Optional[float] = 0
+    iva_27: Optional[float] = 0
+    perc_iva: Optional[float] = 0
+    perc_iibb: Optional[float] = 0
+    perc_otras: Optional[float] = 0
+    sin_factura: Optional[float] = 0
+
+@app.put("/operaciones/{id}")
+def actualizar_operacion(id: int, o: OperacionUpdateIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id_pago, es_informal FROM operaciones WHERE id = %s", (id,))
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error": "Operación no encontrada"}
+            if row["id_pago"] is not None:
+                return {"ok": False, "error_paga": True}
+            es_informal = row["es_informal"]
+            if es_informal:
+                cur.execute("SELECT tipo FROM fondos WHERE id = %s", (o.id_fondo,))
+                fondo_row = cur.fetchone()
+                if fondo_row and fondo_row["tipo"] != "Efectivo":
+                    return {"ok": False, "error_fondo_informal": True}
+            fecha = date.fromisoformat(o.fecha)
+            fecha_compra = date.fromisoformat(o.fecha_compra) if o.fecha_compra else fecha
+            importe = (
+                (o.subtotal or 0) + (o.exento or 0)
+                + (o.iva_105 or 0) + (o.iva_21 or 0) + (o.iva_27 or 0)
+                + (o.perc_iva or 0) + (o.perc_iibb or 0) + (o.perc_otras or 0)
+                + (o.sin_factura or 0)
+            )
+            cur.execute("""
+                UPDATE operaciones SET
+                    fecha=%s, fecha_compra=%s, descripcion=%s, importe=%s, mes=%s,
+                    subtotal=%s, exento=%s, iva_105=%s, iva_21=%s, iva_27=%s,
+                    perc_iva=%s, perc_iibb=%s, perc_otras=%s, sin_factura=%s
+                WHERE id=%s
+            """, (fecha, fecha_compra, o.descripcion, importe, fecha.month,
+                  o.subtotal, o.exento, o.iva_105, o.iva_21, o.iva_27,
+                  o.perc_iva, o.perc_iibb, o.perc_otras, o.sin_factura, id))
+            if o.fecha_vencimiento:
+                fecha_vto = date.fromisoformat(o.fecha_vencimiento)
+            else:
+                cur.execute("SELECT plazo_pago FROM titulares WHERE id = (SELECT id_titular FROM operaciones WHERE id = %s)", (id,))
+                t_row = cur.fetchone()
+                plazo = t_row["plazo_pago"] if t_row and t_row["plazo_pago"] else 0
+                fecha_vto = fecha + timedelta(days=plazo if plazo > 0 else 30)
+            cur.execute("""
+                UPDATE cashflow SET fecha=%s, mes=%s, importe=%s, id_fondo=%s, detalle=%s
+                WHERE id_operacion=%s AND confirmado=false
+            """, (fecha_vto, fecha_vto.month, -abs(importe), o.id_fondo, o.descripcion, id))
+        conn.commit()
+        return {"ok": True, "fecha_vencimiento": str(fecha_vto), "importe": importe}
     finally:
         conn.close()
 
@@ -1092,18 +1163,6 @@ def actualizar_cashflow(id: int, c: CashflowUpdateIn):
             if c.fecha is not None:
                 fecha = date.fromisoformat(c.fecha)
                 cur.execute("UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s", (fecha, fecha.month, id))
-        conn.commit()
-        return {"ok": True}
-    finally:
-        conn.close()
-
-@app.delete("/operaciones/{id}")
-def eliminar_operacion(id: int):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM cashflow WHERE id_operacion = %s AND confirmado = false", (id,))
-            cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
