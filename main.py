@@ -1179,6 +1179,7 @@ def eliminar_cashflow(id: int):
 class CashflowUpdateIn(BaseModel):
     importe: Optional[float] = None
     fecha: Optional[str] = None
+    detalle: Optional[str] = None
 
 @app.put("/cashflow/{id}")
 def actualizar_cashflow(id: int, c: CashflowUpdateIn):
@@ -1190,6 +1191,8 @@ def actualizar_cashflow(id: int, c: CashflowUpdateIn):
             if c.fecha is not None:
                 fecha = date.fromisoformat(c.fecha)
                 cur.execute("UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s", (fecha, fecha.month, id))
+            if c.detalle is not None:
+                cur.execute("UPDATE cashflow SET detalle=%s WHERE id=%s", (c.detalle, id))
         conn.commit()
         return {"ok": True}
     finally:
