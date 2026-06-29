@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from typing import Optional
 from pydantic import BaseModel
 from collections import defaultdict
+import uuid
 
 app = FastAPI()
 
@@ -226,7 +227,8 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
                        c.confirmado, c.id_operacion, c.id_titular,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
                        ch.estado AS estado_cheque,
-           EXISTS(SELECT 1 FROM operaciones o WHERE o.id_pago = c.id) AS cancela_cc
+                       EXISTS(SELECT 1 FROM operaciones o WHERE o.id_pago = c.id) AS cancela_cc,
+                       c.id_transferencia
                 FROM cashflow c
                 LEFT JOIN titulares t ON c.id_titular = t.id
                 LEFT JOIN fondos f ON c.id_fondo = f.id
@@ -322,6 +324,35 @@ def crear_movimiento(m: MovimientoIn):
             """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado))
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+class TransferenciaIn(BaseModel):
+    fecha: str
+    id_fondo_origen: int
+    id_fondo_destino: int
+    importe: float
+    detalle: str = ""
+
+@app.post("/transferencia_fondos")
+def crear_transferencia(t: TransferenciaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(t.fecha)
+            confirmado = fecha <= date.today()
+            id_transf = str(uuid.uuid4())
+            detalle = t.detalle or "Transferencia entre fondos"
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, 717, "Transferencias", detalle, -abs(t.importe), t.id_fondo_origen, confirmado, id_transf))
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, 716, "Transferencias", detalle, abs(t.importe), t.id_fondo_destino, confirmado, id_transf))
+        conn.commit()
+        return {"ok": True, "id_transferencia": id_transf}
     finally:
         conn.close()
 
@@ -442,9 +473,7 @@ def crear_comprobante(c: ComprobanteIn):
         with conn.cursor() as cur:
             fecha = date.fromisoformat(c.fecha)
             fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
-
             es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) > 0)
-
             num_norm = _solo_digitos(c.numero_comprobante)
             if num_norm:
                 cur.execute("""
@@ -456,14 +485,12 @@ def crear_comprobante(c: ComprobanteIn):
                 existe = cur.fetchone()
                 if existe:
                     return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
-
             importe = (
                 (c.subtotal or 0) + (c.exento or 0)
                 + (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
                 + (c.perc_iva or 0) + (c.perc_iibb or 0) + (c.perc_otras or 0)
                 + (c.sin_factura or 0)
             )
-
             cur.execute("""
                 INSERT INTO operaciones
                     (fecha, fecha_compra, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes,
@@ -473,7 +500,6 @@ def crear_comprobante(c: ComprobanteIn):
             """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
                   c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal))
             id_operacion = cur.fetchone()["id"]
-
             id_fondo = c.id_fondo
             if id_fondo:
                 cur.execute("SELECT tipo FROM fondos WHERE id = %s", (id_fondo,))
@@ -490,18 +516,15 @@ def crear_comprobante(c: ComprobanteIn):
                     cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
                     r = cur.fetchone()
                     id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
-
             if not id_fondo:
                 conn.commit()
                 return {"ok": False, "sin_fondo": True}
-
             plazo = None
             if not c.fecha_vencimiento:
                 cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
                 row = cur.fetchone()
                 if row and row["plazo_pago"] and row["plazo_pago"] > 0:
                     plazo = row["plazo_pago"]
-
             if c.fecha_vencimiento:
                 fecha_vto = date.fromisoformat(c.fecha_vencimiento)
                 sin_plazo = False
@@ -511,12 +534,10 @@ def crear_comprobante(c: ComprobanteIn):
             else:
                 fecha_vto = fecha + timedelta(days=30)
                 sin_plazo = True
-
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, false)
             """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
-
             conn.commit()
             return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal}
     finally:
@@ -676,7 +697,6 @@ def registrar_pago(p: PagoIn):
                 fondo_row = cur.fetchone()
                 if fondo_row and fondo_row["tipo"] != "Efectivo":
                     return {"ok": False, "error_fondo_informal": True}
-
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
@@ -714,7 +734,6 @@ def registrar_pago_echeq(p: PagoECheqIn):
             cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
             if cur.fetchone():
                 return {"ok": False, "error_fondo_informal": True}
-
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha_emision = date.fromisoformat(p.fecha_emision)
@@ -1143,8 +1162,15 @@ def eliminar_cashflow(id: int):
             cur.execute("SELECT id FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
             if cur.fetchone():
                 return {"ok": False, "error": "Los ECheqs no se pueden eliminar."}
-            cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
-            cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
+            cur.execute("SELECT id_transferencia FROM cashflow WHERE id = %s", (id,))
+            row = cur.fetchone()
+            id_transf = row["id_transferencia"] if row else None
+            if id_transf:
+                cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_transferencia = %s)", (id_transf,))
+                cur.execute("DELETE FROM cashflow WHERE id_transferencia = %s", (id_transf,))
+            else:
+                cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
+                cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
@@ -1195,7 +1221,6 @@ def guardar_factura(c: FacturaGuardarIn):
             fecha = date.fromisoformat(c.fecha)
             id_tipo = c.id_tipo_comprobante or 999
             id_titular = str(c.id_titular)
-
             num_norm = _solo_digitos(c.numero_comprobante)
             if num_norm:
                 cur.execute("""
@@ -1207,14 +1232,12 @@ def guardar_factura(c: FacturaGuardarIn):
                 existe = cur.fetchone()
                 if existe:
                     return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
-
             cur.execute("""
                 INSERT INTO operaciones (fecha, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (fecha, id_titular, id_tipo, c.numero_comprobante, c.descripcion, c.importe, fecha.month))
             id_operacion = cur.fetchone()["id"]
-
             plazo = None
             if not c.fecha_vencimiento:
                 cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (id_titular,))
@@ -1235,7 +1258,6 @@ def guardar_factura(c: FacturaGuardarIn):
                         INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, false)
                     """, (fecha_vto.month, fecha_vto, id_titular, c.descripcion, -abs(c.importe), id_fondo, id_operacion))
-
             for it in c.items:
                 cur.execute("""
                     INSERT INTO operaciones_items (id_operacion, producto, cantidad, precio_unitario, total_linea, cod_cuenta)
@@ -1248,7 +1270,6 @@ def guardar_factura(c: FacturaGuardarIn):
                         ON CONFLICT (lower(patron_producto), COALESCE(id_titular, ''))
                         DO UPDATE SET cod_cuenta = EXCLUDED.cod_cuenta, creado_en = now()
                     """, (it.producto, id_titular, it.cod_cuenta))
-
         conn.commit()
         return {
             "ok": True,
