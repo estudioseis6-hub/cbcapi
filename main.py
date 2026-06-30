@@ -1,3 +1,6 @@
+# ============================================================
+# MAIN.PY — CBC Sistema Contable — Backend FastAPI
+# ============================================================
 from dotenv import load_dotenv
 import pathlib
 load_dotenv(dotenv_path=pathlib.Path(__file__).parent / ".env")
@@ -69,7 +72,7 @@ def get_fondos_admin():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, nombre, abrev, tipo, moneda, saldo_inicial, activo, es_sistema FROM fondos ORDER BY id")
+            cur.execute("SELECT id, nombre, abrev, tipo, moneda, saldo_inicial, activo, es_sistema, cuenta_patrimonial FROM fondos ORDER BY id")
             return cur.fetchall()
     finally:
         conn.close()
@@ -81,6 +84,7 @@ class FondoUpdateIn(BaseModel):
     moneda: str
     saldo_inicial: float
     activo: bool
+    cuenta_patrimonial: Optional[str] = None
 
 @app.put("/fondos/{id}")
 def actualizar_fondo(id: int, f: FondoUpdateIn):
@@ -88,9 +92,9 @@ def actualizar_fondo(id: int, f: FondoUpdateIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE fondos SET nombre=%s, abrev=%s, tipo=%s, moneda=%s, saldo_inicial=%s, activo=%s
+                UPDATE fondos SET nombre=%s, abrev=%s, tipo=%s, moneda=%s, saldo_inicial=%s, activo=%s, cuenta_patrimonial=%s
                 WHERE id=%s
-            """, (f.nombre, f.abrev, f.tipo, f.moneda, f.saldo_inicial, f.activo, id))
+            """, (f.nombre, f.abrev, f.tipo, f.moneda, f.saldo_inicial, f.activo, f.cuenta_patrimonial, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -125,7 +129,7 @@ def get_titulares():
                        COALESCE(plazo_pago, 0) plazo_pago,
                        cod1, cod2, cod3, cod4, cod5, cod6, cod7, cod8, cod9, cod10,
                        fondo_def, razon_social, cuit, cond_fiscal,
-                       genera_cc, activo, iva_default
+                       genera_cc, activo, iva_default, cuenta_patrimonial
                 FROM titulares
                 ORDER BY CASE WHEN nivel1='SISTEMA' THEN 0 ELSE 1 END, nombre
             """)
@@ -158,6 +162,7 @@ class TitularIn(BaseModel):
     genera_cc: Optional[bool] = True
     activo: Optional[bool] = True
     iva_default: Optional[float] = None
+    cuenta_patrimonial: Optional[str] = None
 
 @app.post("/titulares")
 def crear_titular(t: TitularIn):
@@ -168,12 +173,12 @@ def crear_titular(t: TitularIn):
                 INSERT INTO titulares (nombre, nivel1, nivel2, nivel3, nivel4, tipo_titular, plazo_pago,
                        razon_social, cuit, cond_fiscal,
                        cod1, cod2, cod3, cod4, cod5, cod6, cod7, cod8, cod9, cod10,
-                       fondo_def, genera_cc, activo, iva_default)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       fondo_def, genera_cc, activo, iva_default, cuenta_patrimonial)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (t.nombre, t.nivel1, t.nivel2, t.nivel3, t.nivel4, t.tipo_titular, t.plazo_pago,
                   t.razon_social, t.cuit, t.cond_fiscal,
                   t.cod1, t.cod2, t.cod3, t.cod4, t.cod5, t.cod6, t.cod7, t.cod8, t.cod9, t.cod10,
-                  t.fondo_def, t.genera_cc, t.activo, t.iva_default))
+                  t.fondo_def, t.genera_cc, t.activo, t.iva_default, t.cuenta_patrimonial))
         conn.commit()
         return {"ok": True}
     finally:
@@ -189,13 +194,13 @@ def actualizar_titular(id: str, t: TitularIn):
                        razon_social=%s, cuit=%s, cond_fiscal=%s,
                        cod1=%s, cod2=%s, cod3=%s, cod4=%s, cod5=%s,
                        cod6=%s, cod7=%s, cod8=%s, cod9=%s, cod10=%s,
-                       fondo_def=%s, genera_cc=%s, activo=%s, iva_default=%s
+                       fondo_def=%s, genera_cc=%s, activo=%s, iva_default=%s, cuenta_patrimonial=%s
                 WHERE id=%s
             """, (t.nombre, t.nivel1, t.nivel2, t.nivel3, t.nivel4, t.tipo_titular, t.plazo_pago,
                   t.razon_social, t.cuit, t.cond_fiscal,
                   t.cod1, t.cod2, t.cod3, t.cod4, t.cod5,
                   t.cod6, t.cod7, t.cod8, t.cod9, t.cod10,
-                  t.fondo_def, t.genera_cc, t.activo, t.iva_default, id))
+                  t.fondo_def, t.genera_cc, t.activo, t.iva_default, t.cuenta_patrimonial, id))
         conn.commit()
         return {"ok": True}
     finally:
