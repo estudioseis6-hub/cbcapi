@@ -1375,3 +1375,65 @@ def get_proyeccion_alerta():
         return {"primer_rojo_total": primer_rojo_total, "primer_rojo_por_fondo": primer_rojo_por_fondo}
     finally:
         conn.close()
+
+# ==========================================
+# SALDOS INICIALES — Estado de Situación Patrimonial
+# ==========================================
+class SaldoInicialIn(BaseModel):
+    fecha: str
+    cuenta_patrimonial: str
+    importe: float
+    descripcion: Optional[str] = None
+
+@app.get("/saldos_iniciales")
+def get_saldos_iniciales(fecha: Optional[str] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if fecha:
+                cur.execute("SELECT * FROM saldos_iniciales WHERE fecha = %s ORDER BY cuenta_patrimonial", (fecha,))
+            else:
+                cur.execute("SELECT * FROM saldos_iniciales ORDER BY fecha, cuenta_patrimonial")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/saldos_iniciales")
+def crear_saldo_inicial(s: SaldoInicialIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion))
+            id_nuevo = cur.fetchone()["id"]
+        conn.commit()
+        return {"ok": True, "id": id_nuevo}
+    finally:
+        conn.close()
+
+@app.put("/saldos_iniciales/{id}")
+def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s
+                WHERE id=%s
+            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/saldos_iniciales/{id}")
+def eliminar_saldo_inicial(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM saldos_iniciales WHERE id=%s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
