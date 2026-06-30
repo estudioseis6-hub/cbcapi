@@ -1376,9 +1376,61 @@ def get_proyeccion_alerta():
     finally:
         conn.close()
 
-# ==========================================
-# SALDOS INICIALES — Estado de Situación Patrimonial
-# ==========================================
+@app.get("/balance_patrimonial")
+def get_balance_patrimonial(mes: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Saldos de fondos por cuenta_patrimonial
+            cur.execute("""
+                SELECT f.cuenta_patrimonial,
+                       f.saldo_inicial +
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS saldo_actual
+                FROM fondos f
+                LEFT JOIN cashflow c ON c.id_fondo = f.id
+                WHERE f.cuenta_patrimonial IS NOT NULL AND f.activo = true
+                GROUP BY f.cuenta_patrimonial, f.saldo_inicial
+            """)
+            fondos = {r["cuenta_patrimonial"]: float(r["saldo_actual"]) for r in cur.fetchall()}
+
+            # Facturas impagas en CC por cuenta_patrimonial del titular
+            cur.execute("""
+                SELECT t.cuenta_patrimonial, COALESCE(SUM(o.importe), 0) AS total
+                FROM operaciones o
+                JOIN titulares t ON o.id_titular = t.id
+                WHERE o.id_pago IS NULL AND t.cuenta_patrimonial IS NOT NULL
+                GROUP BY t.cuenta_patrimonial
+            """)
+            pasivo_cc = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+
+            # ECheqs emitidos pendientes
+            cur.execute("""
+                SELECT COALESCE(SUM(c.importe), 0) AS total
+                FROM cashflow c
+                JOIN cheques_emitidos ch ON ch.id_cashflow = c.id
+                WHERE c.confirmado = false
+            """)
+            echeqs = float(cur.fetchone()["total"])
+
+            # Tarjetas pendientes de acreditación (cod_cuenta = 'Tarj. Credit. Pend. Acreditacion')
+            where_mes = f"AND EXTRACT(MONTH FROM c.fecha) = {mes}" if mes else ""
+            cur.execute(f"""
+                SELECT COALESCE(SUM(c.importe), 0) AS total
+                FROM cashflow c
+                WHERE c.cod_cuenta = 'Tarj. Credit. Pend. Acreditacion' {where_mes}
+            """)
+            tarjetas = float(cur.fetchone()["total"])
+
+        return {
+            "fondos": fondos,
+            "pasivo_cc": pasivo_cc,
+            "echeqs_pendientes": echeqs,
+            "tarjetas_pendientes": tarjetas,
+        }
+    finally:
+        conn.close()
+
+
 class SaldoInicialIn(BaseModel):
     fecha: str
     cuenta_patrimonial: str
