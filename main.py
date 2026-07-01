@@ -673,6 +673,7 @@ def get_balance(mes: Optional[int] = None):
                        COALESCE(SUM(c.importe),0) importe
                 FROM plan_de_cuentas p
                 LEFT JOIN cashflow c ON c.cod_cuenta = p.nombre {where_mes}
+                WHERE p.niv1 = 1
                 GROUP BY p.niv1, p.niv1_desc, p.niv2, p.niv2_desc,
                          p.niv3, p.niv3_desc, p.niv4, p.niv4_desc,
                          p.niv5, p.nombre
