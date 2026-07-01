@@ -54,13 +54,16 @@ def get_fondos():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
-                       f.saldo_inicial, f.slot, f.abrev, f.grupo,
+                       COALESCE(si.importe, 0) AS saldo_inicial,
+                       f.slot, f.abrev, f.grupo,
                        COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS movimientos,
                        COALESCE(SUM(CASE WHEN c.fecha > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS proyectado
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
+                LEFT JOIN saldos_iniciales si ON si.cuenta_patrimonial = f.cuenta_patrimonial
+                    AND si.fecha = '2026-05-31'
                 WHERE f.slot IS NOT NULL
-                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, f.saldo_inicial, f.slot, f.abrev, f.grupo
+                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, si.importe, f.slot, f.abrev, f.grupo
                 ORDER BY f.orden
             """)
             return cur.fetchall()
@@ -1385,12 +1388,14 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             # Saldos de fondos por cuenta_patrimonial
             cur.execute("""
                 SELECT f.cuenta_patrimonial,
-                       f.saldo_inicial +
+                       COALESCE(si.importe, 0) +
                        COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS saldo_actual
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
+                LEFT JOIN saldos_iniciales si ON si.cuenta_patrimonial = f.cuenta_patrimonial
+                    AND si.fecha = '2026-05-31'
                 WHERE f.cuenta_patrimonial IS NOT NULL AND f.activo = true
-                GROUP BY f.cuenta_patrimonial, f.saldo_inicial
+                GROUP BY f.cuenta_patrimonial, si.importe
             """)
             fondos = {r["cuenta_patrimonial"]: float(r["saldo_actual"]) for r in cur.fetchall()}
 
