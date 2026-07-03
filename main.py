@@ -1525,14 +1525,20 @@ def crear_cheque_apertura(c: ChequeAperturaIn):
     finally:
         conn.close()
 
-else:
-                cur.execute("DELETE FROM cashflow WHERE id_cheque_apertura=%s", (id,))
-                if c.id_fondo:
-                    cur.execute("""
-                        INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_cheque_apertura)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, false, %s)
-                    """, (fecha.month, fecha, c.id_titular, 'Valores Emitidos — Cheques Pendientes',
-                          f"Cheque apertura #{c.numero or ''}", -abs(c.importe), c.id_fondo, id))
+@app.put("/cheques_apertura/{id}")
+def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE cheques_apertura SET fecha_emision=%s, fecha_cheque=%s, numero=%s,
+                id_titular=%s, id_fondo=%s, importe=%s, descripcion=%s, debitado=%s
+                WHERE id=%s
+            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.id_fondo, c.importe, c.descripcion, c.debitado, id))
+            # Actualizar cashflow proyectado
+            fecha = date.fromisoformat(c.fecha_cheque)
+            if c.debitado:
+                cur.execute("UPDATE cashflow SET confirmado=true WHERE id_cheque_apertura=%s", (id,))
             else:
                 cur.execute("""
                     UPDATE cashflow SET fecha=%s, mes=%s, importe=%s, id_fondo=%s, confirmado=false
