@@ -1481,6 +1481,7 @@ class ChequeAperturaIn(BaseModel):
     fecha_cheque: str
     numero: Optional[str] = None
     id_titular: Optional[int] = None
+    id_fondo: Optional[int] = None
     importe: float
     descripcion: Optional[str] = None
     debitado: Optional[bool] = False
@@ -1510,6 +1511,15 @@ def crear_cheque_apertura(c: ChequeAperturaIn):
                 VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
             """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.importe, c.descripcion, c.debitado))
             id_nuevo = cur.fetchone()["id"]
+            # Crear movimiento proyectado en cashflow si tiene fondo y no está debitado
+            if c.id_fondo and not c.debitado:
+                fecha = date.fromisoformat(c.fecha_cheque)
+                cur.execute("""
+                    INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_cheque_apertura)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, false, %s)
+                """, (fecha.month, fecha, c.id_titular, 'Valores Emitidos — Cheques Pendientes',
+                      f"Cheque apertura #{c.numero or ''} - {c.descripcion or ''}", 
+                      -abs(c.importe), c.id_fondo, id_nuevo))
         conn.commit()
         return {"ok": True, "id": id_nuevo}
     finally:
@@ -1522,9 +1532,18 @@ def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE cheques_apertura SET fecha_emision=%s, fecha_cheque=%s, numero=%s,
-                id_titular=%s, importe=%s, descripcion=%s, debitado=%s
+                id_titular=%s, id_fondo=%s, importe=%s, descripcion=%s, debitado=%s
                 WHERE id=%s
-            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.importe, c.descripcion, c.debitado, id))
+            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.id_fondo, c.importe, c.descripcion, c.debitado, id))
+            # Actualizar cashflow proyectado
+            fecha = date.fromisoformat(c.fecha_cheque)
+            if c.debitado:
+                cur.execute("UPDATE cashflow SET confirmado=true WHERE id_cheque_apertura=%s", (id,))
+            else:
+                cur.execute("""
+                    UPDATE cashflow SET fecha=%s, mes=%s, importe=%s, id_fondo=%s, confirmado=false
+                    WHERE id_cheque_apertura=%s
+                """, (fecha, fecha.month, -abs(c.importe), c.id_fondo, id))
         conn.commit()
         return {"ok": True}
     finally:
