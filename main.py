@@ -1443,6 +1443,28 @@ class SaldoInicialIn(BaseModel):
     importe: float
     descripcion: Optional[str] = None
 
+@app.get("/configuracion")
+def get_configuracion():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT clave, valor, descripcion FROM configuracion ORDER BY clave")
+            rows = cur.fetchall()
+            return {r["clave"]: {"valor": r["valor"], "descripcion": r["descripcion"]} for r in rows}
+    finally:
+        conn.close()
+
+@app.put("/configuracion/{clave}")
+def actualizar_configuracion(clave: str, body: dict):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE configuracion SET valor=%s WHERE clave=%s", (body.get("valor"), clave))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
 @app.get("/saldos_iniciales")
 def get_saldos_iniciales(fecha: Optional[str] = None):
     conn = get_conn()
