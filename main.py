@@ -1385,6 +1385,11 @@ def get_balance_patrimonial(mes: Optional[int] = None):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Leer fecha de corte desde configuracion
+            cur.execute("SELECT valor FROM configuracion WHERE clave = 'fecha_inicio_sistema'")
+            row = cur.fetchone()
+            fecha_corte = row["valor"] if row else "2026-05-31"
+
             # Saldos de fondos por cuenta_patrimonial
             cur.execute("""
                 SELECT f.cuenta_patrimonial,
@@ -1393,21 +1398,33 @@ def get_balance_patrimonial(mes: Optional[int] = None):
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 LEFT JOIN saldos_iniciales si ON si.cuenta_patrimonial = f.cuenta_patrimonial
-                    AND si.fecha = '2026-05-31'
+                    AND si.fecha = %s
                 WHERE f.cuenta_patrimonial IS NOT NULL AND f.activo = true
                 GROUP BY f.cuenta_patrimonial, si.importe
-            """)
+            """, (fecha_corte,))
             fondos = {r["cuenta_patrimonial"]: float(r["saldo_actual"]) for r in cur.fetchall()}
 
-            # Facturas impagas en CC por cuenta_patrimonial del titular
+            # Pasivo inicio: facturas impagas con fecha <= fecha_corte
             cur.execute("""
                 SELECT t.cuenta_patrimonial, COALESCE(SUM(o.importe), 0) AS total
                 FROM operaciones o
                 JOIN titulares t ON o.id_titular = t.id
                 WHERE o.id_pago IS NULL AND t.cuenta_patrimonial IS NOT NULL
+                AND o.fecha <= %s
                 GROUP BY t.cuenta_patrimonial
-            """)
-            pasivo_cc = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+            """, (fecha_corte,))
+            pasivo_cc_inicio = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+
+            # Pasivo actual: facturas impagas con fecha > fecha_corte
+            cur.execute("""
+                SELECT t.cuenta_patrimonial, COALESCE(SUM(o.importe), 0) AS total
+                FROM operaciones o
+                JOIN titulares t ON o.id_titular = t.id
+                WHERE o.id_pago IS NULL AND t.cuenta_patrimonial IS NOT NULL
+                AND o.fecha > %s
+                GROUP BY t.cuenta_patrimonial
+            """, (fecha_corte,))
+            pasivo_cc_actual = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
 
             # ECheqs emitidos pendientes
             cur.execute("""
@@ -1418,7 +1435,7 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             """)
             echeqs = float(cur.fetchone()["total"])
 
-            # Tarjetas pendientes de acreditación (cod_cuenta = 'Tarj. Credit. Pend. Acreditacion')
+            # Tarjetas pendientes de acreditación
             where_mes = f"AND EXTRACT(MONTH FROM c.fecha) = {mes}" if mes else ""
             cur.execute(f"""
                 SELECT COALESCE(SUM(c.importe), 0) AS total
@@ -1429,9 +1446,12 @@ def get_balance_patrimonial(mes: Optional[int] = None):
 
         return {
             "fondos": fondos,
-            "pasivo_cc": pasivo_cc,
+            "pasivo_cc_inicio": pasivo_cc_inicio,
+            "pasivo_cc_actual": pasivo_cc_actual,
+            "pasivo_cc": pasivo_cc_actual,  # compatibilidad
             "echeqs_pendientes": echeqs,
             "tarjetas_pendientes": tarjetas,
+            "fecha_corte": fecha_corte,
         }
     finally:
         conn.close()
