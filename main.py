@@ -1426,7 +1426,7 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             """, (fecha_corte,))
             pasivo_cc_actual = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
 
-            # ECheqs emitidos pendientes
+            # ECheqs emitidos pendientes (operativos)
             cur.execute("""
                 SELECT COALESCE(SUM(c.importe), 0) AS total
                 FROM cashflow c
@@ -1434,6 +1434,14 @@ def get_balance_patrimonial(mes: Optional[int] = None):
                 WHERE c.confirmado = false
             """)
             echeqs = float(cur.fetchone()["total"])
+
+            # Cheques de apertura no debitados (pasivo inicial)
+            cur.execute("""
+                SELECT COALESCE(SUM(importe), 0) AS total
+                FROM cheques_apertura
+                WHERE debitado = false AND fecha_emision <= %s
+            """, (fecha_corte,))
+            cheques_apertura_total = float(cur.fetchone()["total"])
 
             # Tarjetas pendientes de acreditación
             where_mes = f"AND EXTRACT(MONTH FROM c.fecha) = {mes}" if mes else ""
@@ -1448,8 +1456,9 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             "fondos": fondos,
             "pasivo_cc_inicio": pasivo_cc_inicio,
             "pasivo_cc_actual": pasivo_cc_actual,
-            "pasivo_cc": pasivo_cc_actual,  # compatibilidad
+            "pasivo_cc": pasivo_cc_actual,
             "echeqs_pendientes": echeqs,
+            "cheques_apertura": cheques_apertura_total,
             "tarjetas_pendientes": tarjetas,
             "fecha_corte": fecha_corte,
         }
@@ -1462,6 +1471,85 @@ class SaldoInicialIn(BaseModel):
     cuenta_patrimonial: str
     importe: float
     descripcion: Optional[str] = None
+
+
+# ==========================================
+# CHEQUES DE APERTURA
+# ==========================================
+class ChequeAperturaIn(BaseModel):
+    fecha_emision: str
+    fecha_cheque: str
+    numero: Optional[str] = None
+    id_titular: Optional[int] = None
+    importe: float
+    descripcion: Optional[str] = None
+    debitado: Optional[bool] = False
+
+@app.get("/cheques_apertura")
+def get_cheques_apertura():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ca.*, t.nombre as titular_nombre
+                FROM cheques_apertura ca
+                LEFT JOIN titulares t ON t.id::integer = ca.id_titular
+                ORDER BY ca.fecha_cheque, ca.id
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/cheques_apertura")
+def crear_cheque_apertura(c: ChequeAperturaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO cheques_apertura (fecha_emision, fecha_cheque, numero, id_titular, importe, descripcion, debitado)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.importe, c.descripcion, c.debitado))
+            id_nuevo = cur.fetchone()["id"]
+        conn.commit()
+        return {"ok": True, "id": id_nuevo}
+    finally:
+        conn.close()
+
+@app.put("/cheques_apertura/{id}")
+def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE cheques_apertura SET fecha_emision=%s, fecha_cheque=%s, numero=%s,
+                id_titular=%s, importe=%s, descripcion=%s, debitado=%s
+                WHERE id=%s
+            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.importe, c.descripcion, c.debitado, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/cheques_apertura/{id}")
+def eliminar_cheque_apertura(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cheques_apertura WHERE id=%s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/cheques_apertura/total")
+def get_total_cheques_apertura():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(importe), 0) as total FROM cheques_apertura WHERE debitado = false")
+            return cur.fetchone()
+    finally:
+        conn.close()
 
 @app.get("/configuracion")
 def get_configuracion():
