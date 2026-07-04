@@ -1136,6 +1136,93 @@ def eliminar_titular(id: str):
     finally:
         conn.close()
 
+
+# ==========================================
+# EMPLEADOS (separado de titulares)
+# ==========================================
+class EmpleadoIn(BaseModel):
+    nombre: str
+    cuil: Optional[str] = None
+    categoria: Optional[str] = None
+    convenio: Optional[str] = None
+    fecha_ingreso_afip: Optional[str] = None
+    fecha_ingreso_real: Optional[str] = None
+    sueldo_basico: Optional[float] = None
+    forma_pago: Optional[str] = None
+    obra_social: Optional[str] = None
+    sindicato: Optional[str] = None
+    direccion: Optional[str] = None
+    cuenta_patrimonial: Optional[str] = "Remuneraciones a Pagar — Sueldos"
+    activo: Optional[bool] = True
+
+@app.get("/empleados")
+def get_empleados():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, nombre, cuil, categoria, convenio,
+                       fecha_ingreso_afip, fecha_ingreso_real, sueldo_basico,
+                       forma_pago, obra_social, sindicato, direccion,
+                       cuenta_patrimonial, activo
+                FROM empleados
+                ORDER BY nombre
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/empleados")
+def crear_empleado(e: EmpleadoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO empleados
+                    (nombre, cuil, categoria, convenio, fecha_ingreso_afip, fecha_ingreso_real,
+                     sueldo_basico, forma_pago, obra_social, sindicato, direccion,
+                     cuenta_patrimonial, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (e.nombre, e.cuil, e.categoria, e.convenio, e.fecha_ingreso_afip, e.fecha_ingreso_real,
+                  e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
+                  e.cuenta_patrimonial, e.activo))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/empleados/{id}")
+def actualizar_empleado(id: int, e: EmpleadoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE empleados SET
+                    nombre=%s, cuil=%s, categoria=%s, convenio=%s,
+                    fecha_ingreso_afip=%s, fecha_ingreso_real=%s, sueldo_basico=%s,
+                    forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
+                    cuenta_patrimonial=%s, activo=%s
+                WHERE id=%s
+            """, (e.nombre, e.cuil, e.categoria, e.convenio, e.fecha_ingreso_afip, e.fecha_ingreso_real,
+                  e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
+                  e.cuenta_patrimonial, e.activo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/empleados/{id}")
+def eliminar_empleado(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM empleados WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @app.post("/cashflow/{id}/anular_echeq")
 def anular_echeq(id: int):
     conn = get_conn()
