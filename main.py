@@ -1130,6 +1130,20 @@ def eliminar_titular(id: str):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM operaciones WHERE id_titular = %s", (id,))
+            n_operaciones = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM cashflow WHERE id_titular = %s", (id,))
+            n_cashflow = cur.fetchone()["n"]
+            if n_operaciones > 0 or n_cashflow > 0:
+                partes = []
+                if n_operaciones > 0:
+                    partes.append(f"{n_operaciones} comprobante(s) en Cuenta Corriente")
+                if n_cashflow > 0:
+                    partes.append(f"{n_cashflow} movimiento(s) en Tesorería")
+                return {
+                    "ok": False,
+                    "error": "No se puede eliminar: tiene " + " y ".join(partes) + " asociado(s)."
+                }
             cur.execute("DELETE FROM titulares WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
