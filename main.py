@@ -1,5 +1,5 @@
 # ============================================================
-# MAIN.PY — CBC Sistema Contable — Backend FastAPI
+# MAIN.PY — CBC Sistema Contable EMI— Backend FastAPI
 # ============================================================
 from dotenv import load_dotenv
 import pathlib
