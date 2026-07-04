@@ -1440,15 +1440,21 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             """)
             echeqs = float(cur.fetchone()["total"])
 
-            # Cheques de apertura no debitados (pasivo inicial)
+            # Cheques de apertura (pasivo inicial) — todos los emitidos antes del corte, debitados o no
             cur.execute("""
                 SELECT COALESCE(SUM(importe), 0) AS total
                 FROM cheques_apertura
-                WHERE debitado = false AND fecha_emision <= %s
+                WHERE fecha_emision <= %s
             """, (fecha_corte,))
             cheques_apertura_total = float(cur.fetchone()["total"])
 
-            # Tarjetas pendientes de acreditación
+            # Cheques de apertura ya debitados (para restar del pasivo actual)
+            cur.execute("""
+                SELECT COALESCE(SUM(importe), 0) AS total
+                FROM cheques_apertura
+                WHERE debitado = true AND fecha_emision <= %s
+            """, (fecha_corte,))
+            cheques_apertura_debitados = float(cur.fetchone()["total"])
             where_mes = f"AND EXTRACT(MONTH FROM c.fecha) = {mes}" if mes else ""
             cur.execute(f"""
                 SELECT COALESCE(SUM(c.importe), 0) AS total
@@ -1464,6 +1470,7 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             "pasivo_cc": pasivo_cc_actual,
             "echeqs_pendientes": echeqs,
             "cheques_apertura": cheques_apertura_total,
+            "cheques_apertura_debitados": cheques_apertura_debitados,
             "tarjetas_pendientes": tarjetas,
             "fecha_corte": fecha_corte,
         }
