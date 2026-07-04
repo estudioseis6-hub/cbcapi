@@ -290,6 +290,11 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
             cur.execute("UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s",
                         (fecha, fecha.month, id))
             cur.execute("UPDATE cheques_emitidos SET estado='DEBITADO' WHERE id_cashflow=%s", (id,))
+            # Si es un cheque de apertura, marcarlo como debitado
+            cur.execute("SELECT id_cheque_apertura FROM cashflow WHERE id=%s", (id,))
+            row = cur.fetchone()
+            if row and row["id_cheque_apertura"]:
+                cur.execute("UPDATE cheques_apertura SET debitado=true WHERE id=%s", (row["id_cheque_apertura"],))
         conn.commit()
         return {"ok": True}
     finally:
