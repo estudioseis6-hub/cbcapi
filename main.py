@@ -1159,6 +1159,12 @@ class EmpleadoIn(BaseModel):
     cuil: Optional[str] = None
     categoria: Optional[str] = None
     convenio: Optional[str] = None
+    sector: Optional[str] = None
+    fecha_nacimiento: Optional[str] = None
+    telefono: Optional[str] = None
+    email: Optional[str] = None
+    cbu: Optional[str] = None
+    legajo: Optional[str] = None
     fecha_ingreso_afip: Optional[str] = None
     fecha_ingreso_real: Optional[str] = None
     sueldo_basico: Optional[float] = None
@@ -1175,7 +1181,8 @@ def get_empleados():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, nombre, cuil, categoria, convenio,
+                SELECT id, nombre, cuil, categoria, convenio, sector,
+                       fecha_nacimiento, telefono, email, cbu, legajo,
                        fecha_ingreso_afip, fecha_ingreso_real, sueldo_basico,
                        forma_pago, obra_social, sindicato, direccion,
                        cuenta_patrimonial, activo
@@ -1193,11 +1200,13 @@ def crear_empleado(e: EmpleadoIn):
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO empleados
-                    (nombre, cuil, categoria, convenio, fecha_ingreso_afip, fecha_ingreso_real,
+                    (nombre, cuil, categoria, convenio, sector, fecha_nacimiento, telefono, email, cbu, legajo,
+                     fecha_ingreso_afip, fecha_ingreso_real,
                      sueldo_basico, forma_pago, obra_social, sindicato, direccion,
                      cuenta_patrimonial, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (e.nombre, e.cuil, e.categoria, e.convenio, e.fecha_ingreso_afip, e.fecha_ingreso_real,
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (e.nombre, e.cuil, e.categoria, e.convenio, e.sector, e.fecha_nacimiento, e.telefono, e.email, e.cbu, e.legajo,
+                  e.fecha_ingreso_afip, e.fecha_ingreso_real,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.cuenta_patrimonial, e.activo))
         conn.commit()
@@ -1212,12 +1221,15 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE empleados SET
-                    nombre=%s, cuil=%s, categoria=%s, convenio=%s,
+                    nombre=%s, cuil=%s, categoria=%s, convenio=%s, sector=%s,
+                    fecha_nacimiento=%s, telefono=%s, email=%s, cbu=%s, legajo=%s,
                     fecha_ingreso_afip=%s, fecha_ingreso_real=%s, sueldo_basico=%s,
                     forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
                     cuenta_patrimonial=%s, activo=%s
                 WHERE id=%s
-            """, (e.nombre, e.cuil, e.categoria, e.convenio, e.fecha_ingreso_afip, e.fecha_ingreso_real,
+            """, (e.nombre, e.cuil, e.categoria, e.convenio, e.sector,
+                  e.fecha_nacimiento, e.telefono, e.email, e.cbu, e.legajo,
+                  e.fecha_ingreso_afip, e.fecha_ingreso_real,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.cuenta_patrimonial, e.activo, id))
         conn.commit()
@@ -1231,6 +1243,285 @@ def eliminar_empleado(id: int):
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM empleados WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ==========================================
+# CONCEPTOS DE LIQUIDACIÓN (catálogo por convenio)
+# ==========================================
+class ConceptoLiquidacionIn(BaseModel):
+    convenio: str
+    nombre: str
+    tipo: str            # 'HABER' o 'DESCUENTO'
+    calculo: str         # 'MANUAL' o 'AUTOMATICO'
+    track: str           # 'FORMAL', 'REAL' o 'AMBOS'
+    porcentaje: Optional[float] = None
+    orden: Optional[int] = 0
+
+@app.get("/conceptos_liquidacion")
+def get_conceptos_liquidacion(convenio: Optional[str] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if convenio:
+                cur.execute("""
+                    SELECT * FROM conceptos_liquidacion
+                    WHERE convenio = %s OR convenio = 'GENERAL'
+                    ORDER BY orden, id
+                """, (convenio,))
+            else:
+                cur.execute("SELECT * FROM conceptos_liquidacion ORDER BY convenio, orden, id")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/conceptos_liquidacion")
+def crear_concepto_liquidacion(c: ConceptoLiquidacionIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO conceptos_liquidacion (convenio, nombre, tipo, calculo, track, porcentaje, orden)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (c.convenio, c.nombre, c.tipo, c.calculo, c.track, c.porcentaje, c.orden))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/conceptos_liquidacion/{id}")
+def actualizar_concepto_liquidacion(id: int, c: ConceptoLiquidacionIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE conceptos_liquidacion SET
+                    convenio=%s, nombre=%s, tipo=%s, calculo=%s, track=%s, porcentaje=%s, orden=%s
+                WHERE id=%s
+            """, (c.convenio, c.nombre, c.tipo, c.calculo, c.track, c.porcentaje, c.orden, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/conceptos_liquidacion/{id}")
+def eliminar_concepto_liquidacion(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidacion_detalle WHERE id_concepto = %s", (id,))
+            if cur.fetchone()["n"] > 0:
+                return {"ok": False, "error": "No se puede eliminar: ya fue usado en liquidaciones existentes."}
+            cur.execute("DELETE FROM conceptos_liquidacion WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ==========================================
+# LIQUIDACIONES — motor de cálculo (dos tracks: FORMAL / REAL)
+# ==========================================
+def _get_config_num(cur, clave, default):
+    cur.execute("SELECT valor FROM configuracion WHERE clave = %s", (clave,))
+    row = cur.fetchone()
+    return float(row["valor"]) if row else default
+
+def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia):
+    """Devuelve lista de detalle [(id_concepto, nombre, tipo, monto)] y el neto de ese track."""
+    detalle = []
+    total_haberes = 0.0
+    total_descuentos = 0.0
+    for c in conceptos:
+        if c["track"] not in (track, "AMBOS"):
+            continue
+        nombre = c["nombre"]
+        if c["calculo"] == "MANUAL":
+            monto = float(manuales.get((track, c["id"]), 0) or 0)
+        elif nombre == "Presentismo":
+            monto = 0.0 if (aus_just + aus_no_just) > 0 else sueldo_basico * float(c["porcentaje"] or 0)
+        elif nombre == "Feriados":
+            monto = (sueldo_basico / divisor_feriado) * feriados if divisor_feriado else 0.0
+        elif nombre == "Ausencias No Justificadas":
+            monto = (sueldo_basico / divisor_dia) * aus_no_just if divisor_dia else 0.0
+        elif c["calculo"] == "AUTOMATICO" and c["porcentaje"] is not None:
+            monto = sueldo_basico * float(c["porcentaje"])
+        else:
+            monto = 0.0
+        monto = round(monto, 2)
+        detalle.append({"id_concepto": c["id"], "nombre": nombre, "tipo": c["tipo"], "track": track, "monto": monto})
+        if c["tipo"] == "HABER":
+            total_haberes += monto
+        else:
+            total_descuentos += monto
+    bruto = round(sueldo_basico + total_haberes, 2)
+    neto = round(bruto - total_descuentos, 2)
+    return detalle, bruto, neto
+
+class LiquidacionCalcularIn(BaseModel):
+    convenio: str
+    sueldo_basico_formal: float
+    sueldo_basico_real: Optional[float] = None
+    feriados_trabajados: int = 0
+    ausencias_justificadas: int = 0
+    ausencias_no_justificadas: int = 0
+    manuales: dict = {}   # { "FORMAL:3": 23000, "REAL:7": 100000 }
+
+def _parse_manuales(manuales_in):
+    out = {}
+    for k, v in (manuales_in or {}).items():
+        track, id_concepto = k.split(":")
+        out[(track, int(id_concepto))] = v
+    return out
+
+@app.post("/liquidaciones/calcular")
+def calcular_liquidacion(l: LiquidacionCalcularIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM conceptos_liquidacion
+                WHERE convenio = %s OR convenio = 'GENERAL'
+                ORDER BY orden, id
+            """, (l.convenio,))
+            conceptos = cur.fetchall()
+            divisor_feriado = _get_config_num(cur, "divisor_feriado", 25)
+            divisor_dia = _get_config_num(cur, "divisor_dia_normal", 30)
+
+        manuales = _parse_manuales(l.manuales)
+
+        detalle_formal, bruto_formal, neto_formal = _calcular_track(
+            conceptos, "FORMAL", l.sueldo_basico_formal, l.feriados_trabajados,
+            l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia
+        )
+
+        detalle_real, bruto_real, neto_real = None, None, None
+        pago_efectivo = 0.0
+        if l.sueldo_basico_real is not None:
+            detalle_real, bruto_real, neto_real = _calcular_track(
+                conceptos, "REAL", l.sueldo_basico_real, l.feriados_trabajados,
+                l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia
+            )
+            pago_efectivo = round(neto_real - neto_formal, 2)
+
+        neto_total = round(neto_formal + pago_efectivo, 2)
+
+        return {
+            "detalle_formal": detalle_formal,
+            "detalle_real": detalle_real,
+            "total_bruto_formal": bruto_formal,
+            "neto_formal": neto_formal,
+            "total_bruto_real": bruto_real,
+            "neto_real": neto_real,
+            "pago_efectivo": pago_efectivo,
+            "neto_total_a_pagar": neto_total,
+        }
+    finally:
+        conn.close()
+
+
+class LiquidacionIn(LiquidacionCalcularIn):
+    id_empleado: int
+    mes: int
+    anio: int
+    fecha: str
+
+@app.get("/liquidaciones")
+def get_liquidaciones(mes: Optional[int] = None, anio: Optional[int] = None, id_empleado: Optional[int] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT l.*, e.nombre AS empleado_nombre
+                FROM liquidaciones l
+                JOIN empleados e ON e.id = l.id_empleado
+                WHERE 1=1
+            """
+            params = []
+            if mes is not None:
+                query += " AND l.mes = %s"; params.append(mes)
+            if anio is not None:
+                query += " AND l.anio = %s"; params.append(anio)
+            if id_empleado is not None:
+                query += " AND l.id_empleado = %s"; params.append(id_empleado)
+            query += " ORDER BY e.nombre"
+            cur.execute(query, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/liquidaciones/{id}")
+def get_liquidacion(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM liquidaciones WHERE id = %s", (id,))
+            liq = cur.fetchone()
+            if not liq:
+                return {"ok": False, "error": "No encontrada"}
+            cur.execute("SELECT ld.*, c.nombre, c.tipo FROM liquidacion_detalle ld JOIN conceptos_liquidacion c ON c.id = ld.id_concepto WHERE id_liquidacion = %s", (id,))
+            liq["detalle"] = cur.fetchall()
+            return liq
+    finally:
+        conn.close()
+
+@app.post("/liquidaciones")
+def crear_liquidacion(l: LiquidacionIn):
+    conn = get_conn()
+    try:
+        calculo = calcular_liquidacion(l)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO liquidaciones
+                    (id_empleado, mes, anio, fecha, sueldo_basico_formal, sueldo_basico_real,
+                     feriados_trabajados, ausencias_justificadas, ausencias_no_justificadas,
+                     total_bruto_formal, neto_formal, total_bruto_real, neto_real,
+                     pago_efectivo, neto_total_a_pagar, saldo_pendiente)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id_empleado, mes, anio) DO UPDATE SET
+                    fecha=EXCLUDED.fecha, sueldo_basico_formal=EXCLUDED.sueldo_basico_formal,
+                    sueldo_basico_real=EXCLUDED.sueldo_basico_real,
+                    feriados_trabajados=EXCLUDED.feriados_trabajados,
+                    ausencias_justificadas=EXCLUDED.ausencias_justificadas,
+                    ausencias_no_justificadas=EXCLUDED.ausencias_no_justificadas,
+                    total_bruto_formal=EXCLUDED.total_bruto_formal, neto_formal=EXCLUDED.neto_formal,
+                    total_bruto_real=EXCLUDED.total_bruto_real, neto_real=EXCLUDED.neto_real,
+                    pago_efectivo=EXCLUDED.pago_efectivo, neto_total_a_pagar=EXCLUDED.neto_total_a_pagar,
+                    saldo_pendiente = liquidaciones.saldo_pendiente + (EXCLUDED.neto_total_a_pagar - liquidaciones.neto_total_a_pagar)
+                RETURNING id
+            """, (l.id_empleado, l.mes, l.anio, l.fecha, l.sueldo_basico_formal, l.sueldo_basico_real,
+                  l.feriados_trabajados, l.ausencias_justificadas, l.ausencias_no_justificadas,
+                  calculo["total_bruto_formal"], calculo["neto_formal"], calculo["total_bruto_real"], calculo["neto_real"],
+                  calculo["pago_efectivo"], calculo["neto_total_a_pagar"], calculo["neto_total_a_pagar"]))
+            id_liq = cur.fetchone()["id"]
+
+            cur.execute("DELETE FROM liquidacion_detalle WHERE id_liquidacion = %s", (id_liq,))
+            detalle_completo = calculo["detalle_formal"] + (calculo["detalle_real"] or [])
+            for d in detalle_completo:
+                cur.execute("""
+                    INSERT INTO liquidacion_detalle (id_liquidacion, track, id_concepto, monto)
+                    VALUES (%s,%s,%s,%s)
+                """, (id_liq, d["track"], d["id_concepto"], d["monto"]))
+        conn.commit()
+        return {"ok": True, "id": id_liq, **calculo}
+    finally:
+        conn.close()
+
+@app.delete("/liquidaciones/{id}")
+def eliminar_liquidacion(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT saldo_pendiente, neto_total_a_pagar FROM liquidaciones WHERE id = %s", (id,))
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error": "No encontrada"}
+            if row["saldo_pendiente"] != row["neto_total_a_pagar"]:
+                return {"ok": False, "error": "No se puede eliminar: ya tiene pagos registrados contra esta liquidación."}
+            cur.execute("DELETE FROM liquidaciones WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
