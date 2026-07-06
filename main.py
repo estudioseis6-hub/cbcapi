@@ -1476,7 +1476,7 @@ def get_basicos_anteriores(mes: int, anio: int):
                     "nombre": e["nombre"],
                     "convenio": e["convenio"],
                     "sueldo_basico_formal": float(prev["sueldo_basico_formal"]) if prev else float(e["sueldo_basico"] or 0),
-                    "sueldo_basico_real": float(prev["sueldo_basico_real"]) if (prev and prev["sueldo_basico_real"] is not None) else None,
+                    "sueldo_basico_real": float(prev["sueldo_basico_real"]) if (prev and prev["sueldo_basico_real"] is not None) else (float(prev["sueldo_basico_formal"]) if prev else float(e["sueldo_basico"] or 0)),
                 })
             return out
     finally:
