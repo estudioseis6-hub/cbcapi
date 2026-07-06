@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import date, timedelta
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 from collections import defaultdict
 import uuid
@@ -1452,6 +1452,49 @@ def get_liquidaciones(mes: Optional[int] = None, anio: Optional[int] = None, id_
             return cur.fetchall()
     finally:
         conn.close()
+
+@app.get("/liquidaciones/basicos_anteriores")
+def get_basicos_anteriores(mes: int, anio: int):
+    """Para cada empleado activo, trae el último Básico (Formal/Real) que usó ANTES de mes/año.
+    Si nunca liquidó, usa empleados.sueldo_basico como arranque."""
+    mes_prev, anio_prev = (12, anio - 1) if mes == 1 else (mes - 1, anio)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, nombre, convenio, sueldo_basico FROM empleados WHERE activo = true ORDER BY nombre")
+            empleados = cur.fetchall()
+            out = []
+            for e in empleados:
+                cur.execute("""
+                    SELECT sueldo_basico_formal, sueldo_basico_real FROM liquidaciones
+                    WHERE id_empleado = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                    ORDER BY anio DESC, mes DESC LIMIT 1
+                """, (e["id"], anio_prev, anio_prev, mes_prev))
+                prev = cur.fetchone()
+                out.append({
+                    "id_empleado": e["id"],
+                    "nombre": e["nombre"],
+                    "convenio": e["convenio"],
+                    "sueldo_basico_formal": float(prev["sueldo_basico_formal"]) if prev else float(e["sueldo_basico"] or 0),
+                    "sueldo_basico_real": float(prev["sueldo_basico_real"]) if (prev and prev["sueldo_basico_real"] is not None) else None,
+                })
+            return out
+    finally:
+        conn.close()
+
+@app.post("/liquidaciones/calcular_lote")
+def calcular_liquidaciones_lote(items: List[LiquidacionCalcularIn]):
+    return [calcular_liquidacion(item) for item in items]
+
+@app.post("/liquidaciones/guardar_lote")
+def guardar_liquidaciones_lote(items: List[LiquidacionIn]):
+    resultados = []
+    for item in items:
+        try:
+            resultados.append({"id_empleado": item.id_empleado, **crear_liquidacion(item)})
+        except Exception as ex:
+            resultados.append({"id_empleado": item.id_empleado, "ok": False, "error": str(ex)})
+    return resultados
 
 @app.get("/liquidaciones/{id}")
 def get_liquidacion(id: int):
