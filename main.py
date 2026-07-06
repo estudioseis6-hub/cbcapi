@@ -2033,7 +2033,11 @@ def actualizar_configuracion(clave: str, body: dict):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE configuracion SET valor=%s WHERE clave=%s", (body.get("valor"), clave))
+            cur.execute("""
+                INSERT INTO configuracion (clave, valor, descripcion)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor
+            """, (clave, body.get("valor"), body.get("descripcion")))
         conn.commit()
         return {"ok": True}
     finally:
