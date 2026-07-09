@@ -1277,6 +1277,17 @@ class PuestoRealIn(BaseModel):
     posicion_real: str
     activo: Optional[bool] = True
 
+@app.get("/convenios")
+def get_convenios():
+    """Lista los convenios que ya tienen posiciones reales cargadas."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT convenio FROM cat_puestos_reales ORDER BY convenio")
+            return [r["convenio"] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
 @app.get("/cat_puestos_reales")
 def get_cat_puestos_reales(convenio: Optional[str] = None):
     conn = get_conn()
