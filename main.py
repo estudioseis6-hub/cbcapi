@@ -1267,6 +1267,69 @@ def eliminar_puesto(id: int):
         conn.close()
 
 
+# ==========================================
+# CATÁLOGO DE POSICIONES REALES (Nivel → Sector → Posición Real)
+# ==========================================
+class PuestoRealIn(BaseModel):
+    convenio: str
+    nivel: str
+    sector: Optional[str] = None
+    posicion_real: str
+    activo: Optional[bool] = True
+
+@app.get("/cat_puestos_reales")
+def get_cat_puestos_reales(convenio: Optional[str] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if convenio:
+                cur.execute("""
+                    SELECT * FROM cat_puestos_reales
+                    WHERE convenio = %s AND activo = true
+                    ORDER BY nivel, sector NULLS FIRST, posicion_real
+                """, (convenio,))
+            else:
+                cur.execute("SELECT * FROM cat_puestos_reales ORDER BY convenio, nivel, sector NULLS FIRST, posicion_real")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/cat_puestos_reales")
+def crear_puesto_real(p: PuestoRealIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("""
+                    INSERT INTO cat_puestos_reales (convenio, nivel, sector, posicion_real, activo)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.activo))
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                return {"ok": False, "error": "Esa posición real ya existe para ese convenio/nivel/sector."}
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/cat_puestos_reales/{id}/formales")
+def get_formales_de_real(id: int):
+    """Devuelve las posiciones Formales permitidas para una posición Real, ordenadas de mayor a menor jerarquía."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.id, f.posicion, f.categoria_convenio
+                FROM cat_puestos_reales_formal rf
+                JOIN cat_puestos f ON f.id = rf.id_formal
+                WHERE rf.id_real = %s
+                ORDER BY f.categoria_convenio DESC, f.posicion
+            """, (id,))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
 @app.get("/empleados")
 def get_empleados():
     conn = get_conn()
@@ -1293,15 +1356,15 @@ def crear_empleado(e: EmpleadoIn):
                      fecha_ingreso_afip, fecha_ingreso_real,
                      sueldo_basico, forma_pago, obra_social, sindicato, direccion,
                      dom_calle, dom_numero, dom_piso, dom_depto, dom_barrio, dom_localidad, dom_provincia, dom_codigo_postal,
-                     cuenta_patrimonial, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     id_puesto_formal_declarado, cuenta_patrimonial, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
                   e.fecha_ingreso_afip, e.fecha_ingreso_real,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
-                  e.cuenta_patrimonial, e.activo))
+                  e.id_puesto_formal_declarado, e.cuenta_patrimonial, e.activo))
         conn.commit()
         return {"ok": True}
     finally:
@@ -1320,7 +1383,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                     fecha_ingreso_afip=%s, fecha_ingreso_real=%s, sueldo_basico=%s,
                     forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
                     dom_calle=%s, dom_numero=%s, dom_piso=%s, dom_depto=%s, dom_barrio=%s, dom_localidad=%s, dom_provincia=%s, dom_codigo_postal=%s,
-                    cuenta_patrimonial=%s, activo=%s
+                    id_puesto_formal_declarado=%s, cuenta_patrimonial=%s, activo=%s
                 WHERE id=%s
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
@@ -1328,7 +1391,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                   e.fecha_ingreso_afip, e.fecha_ingreso_real,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
-                  e.cuenta_patrimonial, e.activo, id))
+                  e.id_puesto_formal_declarado, e.cuenta_patrimonial, e.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
