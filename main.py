@@ -1277,7 +1277,6 @@ class PuestoRealIn(BaseModel):
     nivel: str
     sector: Optional[str] = None
     posicion_real: str
-    sueldo_estandar_real: Optional[float] = None
     activo: Optional[bool] = True
 
 @app.get("/convenios")
@@ -1315,9 +1314,9 @@ def crear_puesto_real(p: PuestoRealIn):
         with conn.cursor() as cur:
             try:
                 cur.execute("""
-                    INSERT INTO cat_puestos_reales (convenio, nivel, sector, posicion_real, sueldo_estandar_real, activo)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.sueldo_estandar_real, p.activo))
+                    INSERT INTO cat_puestos_reales (convenio, nivel, sector, posicion_real, activo)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.activo))
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
                 return {"ok": False, "error": "Esa posición real ya existe para ese convenio/nivel/sector."}
@@ -1332,11 +1331,80 @@ def actualizar_puesto_real(id: int, p: PuestoRealIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE cat_puestos_reales SET convenio=%s, nivel=%s, sector=%s, posicion_real=%s, sueldo_estandar_real=%s, activo=%s
+                UPDATE cat_puestos_reales SET convenio=%s, nivel=%s, sector=%s, posicion_real=%s, activo=%s
                 WHERE id=%s
-            """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.sueldo_estandar_real, p.activo, id))
+            """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.activo, id))
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ==========================================
+# ESCALA SALARIAL REAL — sueldo estándar por posición Real, versionado por mes
+# (mismo criterio que escala_salarial para el lado Formal)
+# ==========================================
+class EscalaSalarialRealIn(BaseModel):
+    id_real: int
+    mes: int
+    anio: int
+    sueldo_estandar: float
+
+@app.get("/escala_salarial_real")
+def get_escala_salarial_real(mes: int, anio: int, convenio: Optional[str] = None):
+    """Para cada posición Real (de un convenio), trae el sueldo estándar de ese mes,
+    o si no está cargado, el último valor anterior (mismo criterio que básicos_anteriores)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if convenio:
+                cur.execute("SELECT id, posicion_real, nivel, sector FROM cat_puestos_reales WHERE convenio = %s AND activo = true ORDER BY nivel, sector NULLS FIRST, posicion_real", (convenio,))
+            else:
+                cur.execute("SELECT id, posicion_real, nivel, sector FROM cat_puestos_reales WHERE activo = true ORDER BY convenio, nivel, sector NULLS FIRST, posicion_real")
+            posiciones = cur.fetchall()
+            out = []
+            for p in posiciones:
+                cur.execute("""
+                    SELECT sueldo_estandar FROM escala_salarial_real
+                    WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                    ORDER BY anio DESC, mes DESC LIMIT 1
+                """, (p["id"], anio, anio, mes))
+                row = cur.fetchone()
+                out.append({
+                    "id_real": p["id"], "posicion_real": p["posicion_real"], "nivel": p["nivel"], "sector": p["sector"],
+                    "sueldo_estandar": float(row["sueldo_estandar"]) if row else None,
+                })
+            return out
+    finally:
+        conn.close()
+
+@app.post("/escala_salarial_real")
+def guardar_escala_salarial_real(e: EscalaSalarialRealIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO escala_salarial_real (id_real, mes, anio, sueldo_estandar)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (id_real, mes, anio) DO UPDATE SET sueldo_estandar = EXCLUDED.sueldo_estandar
+            """, (e.id_real, e.mes, e.anio, e.sueldo_estandar))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/cat_puestos_reales/{id}/sueldo_actual")
+def get_sueldo_actual_real(id: int):
+    """Último sueldo estándar cargado para esta posición, sin importar el mes (para autocompletar en el alta de empleados)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT sueldo_estandar, mes, anio FROM escala_salarial_real
+                WHERE id_real = %s ORDER BY anio DESC, mes DESC LIMIT 1
+            """, (id,))
+            row = cur.fetchone()
+            return {"sueldo_estandar": float(row["sueldo_estandar"]) if row else None, "mes": row["mes"] if row else None, "anio": row["anio"] if row else None}
     finally:
         conn.close()
 
