@@ -1277,6 +1277,7 @@ class PuestoRealIn(BaseModel):
     nivel: str
     sector: Optional[str] = None
     posicion_real: str
+    sueldo_estandar_real: Optional[float] = None
     activo: Optional[bool] = True
 
 @app.get("/convenios")
@@ -1314,12 +1315,26 @@ def crear_puesto_real(p: PuestoRealIn):
         with conn.cursor() as cur:
             try:
                 cur.execute("""
-                    INSERT INTO cat_puestos_reales (convenio, nivel, sector, posicion_real, activo)
-                    VALUES (%s,%s,%s,%s,%s)
-                """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.activo))
+                    INSERT INTO cat_puestos_reales (convenio, nivel, sector, posicion_real, sueldo_estandar_real, activo)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.sueldo_estandar_real, p.activo))
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
                 return {"ok": False, "error": "Esa posición real ya existe para ese convenio/nivel/sector."}
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/cat_puestos_reales/{id}")
+def actualizar_puesto_real(id: int, p: PuestoRealIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE cat_puestos_reales SET convenio=%s, nivel=%s, sector=%s, posicion_real=%s, sueldo_estandar_real=%s, activo=%s
+                WHERE id=%s
+            """, (p.convenio, p.nivel, p.sector, p.posicion_real, p.sueldo_estandar_real, p.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
