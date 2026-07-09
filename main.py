@@ -1166,6 +1166,7 @@ class EmpleadoIn(BaseModel):
     categoria: Optional[str] = None
     convenio: Optional[str] = None
     sector: Optional[str] = None
+    sector_detalle: Optional[str] = None
     turno: Optional[str] = None
     fecha_nacimiento: Optional[str] = None
     telefono: Optional[str] = None
@@ -1192,6 +1193,76 @@ class EmpleadoIn(BaseModel):
     cuenta_patrimonial: Optional[str] = "Remuneraciones a Pagar — Sueldos"
     activo: Optional[bool] = True
 
+# ==========================================
+# CATÁLOGO DE PUESTOS (Nivel → Sector → Posición)
+# ==========================================
+class PuestoIn(BaseModel):
+    convenio: str
+    nivel: str
+    sector: Optional[str] = None
+    posicion: str
+    activo: Optional[bool] = True
+
+@app.get("/cat_puestos")
+def get_cat_puestos(convenio: Optional[str] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if convenio:
+                cur.execute("""
+                    SELECT * FROM cat_puestos
+                    WHERE (convenio = %s OR convenio = 'GENERAL') AND activo = true
+                    ORDER BY nivel, sector NULLS FIRST, posicion
+                """, (convenio,))
+            else:
+                cur.execute("SELECT * FROM cat_puestos ORDER BY convenio, nivel, sector NULLS FIRST, posicion")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/cat_puestos")
+def crear_puesto(p: PuestoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO cat_puestos (convenio, nivel, sector, posicion, activo)
+                VALUES (%s,%s,%s,%s,%s)
+            """, (p.convenio, p.nivel, p.sector, p.posicion, p.activo))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/cat_puestos/{id}")
+def actualizar_puesto(id: int, p: PuestoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE cat_puestos SET convenio=%s, nivel=%s, sector=%s, posicion=%s, activo=%s
+                WHERE id=%s
+            """, (p.convenio, p.nivel, p.sector, p.posicion, p.activo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/cat_puestos/{id}")
+def eliminar_puesto(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM empleados WHERE categoria = (SELECT posicion FROM cat_puestos WHERE id = %s)", (id,))
+            if cur.fetchone()["n"] > 0:
+                return {"ok": False, "error": "No se puede eliminar: hay empleados con esta posición asignada."}
+            cur.execute("DELETE FROM cat_puestos WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @app.get("/empleados")
 def get_empleados():
     conn = get_conn()
@@ -1213,15 +1284,15 @@ def crear_empleado(e: EmpleadoIn):
             cur.execute("""
                 INSERT INTO empleados
                     (nombre, apellido, cuil, tipo_documento, nro_documento, nacionalidad, profesion, estado_civil,
-                     categoria, convenio, sector, turno, fecha_nacimiento, telefono, email,
+                     categoria, convenio, sector, sector_detalle, turno, fecha_nacimiento, telefono, email,
                      banco, cbu, alias_cbu, legajo,
                      fecha_ingreso_afip, fecha_ingreso_real,
                      sueldo_basico, forma_pago, obra_social, sindicato, direccion,
                      dom_calle, dom_numero, dom_piso, dom_depto, dom_barrio, dom_localidad, dom_provincia, dom_codigo_postal,
                      cuenta_patrimonial, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
-                  e.categoria, e.convenio, e.sector, e.turno, e.fecha_nacimiento, e.telefono, e.email,
+                  e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
                   e.fecha_ingreso_afip, e.fecha_ingreso_real,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
@@ -1240,7 +1311,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
             cur.execute("""
                 UPDATE empleados SET
                     nombre=%s, apellido=%s, cuil=%s, tipo_documento=%s, nro_documento=%s, nacionalidad=%s, profesion=%s, estado_civil=%s,
-                    categoria=%s, convenio=%s, sector=%s, turno=%s, fecha_nacimiento=%s, telefono=%s, email=%s,
+                    categoria=%s, convenio=%s, sector=%s, sector_detalle=%s, turno=%s, fecha_nacimiento=%s, telefono=%s, email=%s,
                     banco=%s, cbu=%s, alias_cbu=%s, legajo=%s,
                     fecha_ingreso_afip=%s, fecha_ingreso_real=%s, sueldo_basico=%s,
                     forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
@@ -1248,7 +1319,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                     cuenta_patrimonial=%s, activo=%s
                 WHERE id=%s
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
-                  e.categoria, e.convenio, e.sector, e.turno, e.fecha_nacimiento, e.telefono, e.email,
+                  e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
                   e.fecha_ingreso_afip, e.fecha_ingreso_real,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
