@@ -1383,6 +1383,9 @@ def guardar_escala_salarial_real(e: EscalaSalarialRealIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (e.mes, e.anio))
+            if cur.fetchone()["n"] > 0:
+                return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede modificar la escala salarial de un mes ya liquidado."}
             cur.execute("""
                 INSERT INTO escala_salarial_real (id_real, mes, anio, sueldo_estandar)
                 VALUES (%s,%s,%s,%s)
@@ -1390,6 +1393,84 @@ def guardar_escala_salarial_real(e: EscalaSalarialRealIn):
             """, (e.id_real, e.mes, e.anio, e.sueldo_estandar))
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+@app.get("/escala_salarial_real/mes_cerrado")
+def get_mes_cerrado(mes: int, anio: int):
+    """Indica si ya existen liquidaciones guardadas para ese mes (bloquea edición de la escala)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (mes, anio))
+            return {"cerrado": cur.fetchone()["n"] > 0}
+    finally:
+        conn.close()
+
+class AumentoIn(BaseModel):
+    mes: int
+    anio: int
+    porcentaje: float
+    convenio: Optional[str] = None
+
+@app.post("/escala_salarial_real/aumento")
+def aplicar_aumento_real(a: AumentoIn):
+    """Aplica un % de aumento a TODAS las posiciones, tomando como base el valor vigente
+    (el de este mes si ya hay algo cargado, o el arrastrado del último mes anterior)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (a.mes, a.anio))
+            if cur.fetchone()["n"] > 0:
+                return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede aplicar un aumento sobre un mes ya liquidado."}
+            if a.convenio:
+                cur.execute("SELECT id FROM cat_puestos_reales WHERE convenio = %s AND activo = true", (a.convenio,))
+            else:
+                cur.execute("SELECT id FROM cat_puestos_reales WHERE activo = true")
+            posiciones = cur.fetchall()
+            actualizadas = 0
+            for p in posiciones:
+                cur.execute("""
+                    SELECT sueldo_estandar FROM escala_salarial_real
+                    WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                    ORDER BY anio DESC, mes DESC LIMIT 1
+                """, (p["id"], a.anio, a.anio, a.mes))
+                row = cur.fetchone()
+                if not row:
+                    continue
+                nuevo_valor = round(float(row["sueldo_estandar"]) * (1 + a.porcentaje / 100), 2)
+                cur.execute("""
+                    INSERT INTO escala_salarial_real (id_real, mes, anio, sueldo_estandar)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT (id_real, mes, anio) DO UPDATE SET sueldo_estandar = EXCLUDED.sueldo_estandar
+                """, (p["id"], a.mes, a.anio, nuevo_valor))
+                actualizadas += 1
+        conn.commit()
+        return {"ok": True, "actualizadas": actualizadas}
+    finally:
+        conn.close()
+
+@app.get("/escala_salarial_real/comparativo")
+def get_comparativo_real(anio: int, convenio: Optional[str] = None):
+    """Devuelve, para cada posición, el sueldo estándar de cada uno de los 12 meses del año —
+    para poder comparar de un vistazo cómo evolucionó, estilo planilla Excel."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if convenio:
+                cur.execute("SELECT id, posicion_real, nivel, sector FROM cat_puestos_reales WHERE convenio = %s AND activo = true ORDER BY nivel, sector NULLS FIRST, posicion_real", (convenio,))
+            else:
+                cur.execute("SELECT id, posicion_real, nivel, sector FROM cat_puestos_reales WHERE activo = true ORDER BY convenio, nivel, sector NULLS FIRST, posicion_real")
+            posiciones = cur.fetchall()
+            out = []
+            for p in posiciones:
+                cur.execute("SELECT mes, sueldo_estandar FROM escala_salarial_real WHERE id_real = %s AND anio = %s", (p["id"], anio))
+                valores = {r["mes"]: float(r["sueldo_estandar"]) for r in cur.fetchall()}
+                out.append({
+                    "id_real": p["id"], "posicion_real": p["posicion_real"], "nivel": p["nivel"], "sector": p["sector"],
+                    "meses": [valores.get(m) for m in range(1, 13)],
+                })
+            return out
     finally:
         conn.close()
 
