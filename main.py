@@ -1225,10 +1225,14 @@ def crear_puesto(p: PuestoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO cat_puestos (convenio, nivel, sector, posicion, activo)
-                VALUES (%s,%s,%s,%s,%s)
-            """, (p.convenio, p.nivel, p.sector, p.posicion, p.activo))
+            try:
+                cur.execute("""
+                    INSERT INTO cat_puestos (convenio, nivel, sector, posicion, activo)
+                    VALUES (%s,%s,%s,%s,%s)
+                """, (p.convenio, p.nivel, p.sector, p.posicion, p.activo))
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                return {"ok": False, "error": "Ese puesto ya existe para ese convenio/nivel/sector."}
         conn.commit()
         return {"ok": True}
     finally:
