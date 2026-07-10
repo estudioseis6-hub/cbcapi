@@ -1989,12 +1989,26 @@ def get_basicos_anteriores(mes: int, anio: int):
             tenedores = int(row["valor"]) if row and row["valor"] else None
 
             cur.execute("""
-                SELECT id, nombre, convenio, sueldo_basico, id_puesto_formal_declarado, id_puesto_real_declarado
+                SELECT id, nombre, convenio, sueldo_basico, id_puesto_formal_declarado, id_puesto_real_declarado,
+                       fecha_ingreso_afip, fecha_ingreso_real
                 FROM empleados WHERE activo = true ORDER BY nombre
             """)
             empleados = cur.fetchall()
+            from datetime import date as _date
+            fecha_periodo = _date(anio, mes, 1)
             out = []
             for e in empleados:
+                # Si el período que se está liquidando es ANTERIOR a la fecha de ingreso de cada circuito,
+                # ese circuito todavía no corresponde — ni historial ni Escala, directamente $0.
+                fecha_ingreso_formal = e["fecha_ingreso_afip"]
+                fecha_ingreso_real_emp = e["fecha_ingreso_real"]
+                no_corresponde_formal = fecha_ingreso_formal and _date(fecha_ingreso_formal.year, fecha_ingreso_formal.month, 1) > fecha_periodo
+                no_corresponde_real = fecha_ingreso_real_emp and _date(fecha_ingreso_real_emp.year, fecha_ingreso_real_emp.month, 1) > fecha_periodo
+
+                # Si en NINGUNO de los dos circuitos había ingresado todavía, directamente no aparece este mes.
+                if no_corresponde_formal and no_corresponde_real:
+                    continue
+
                 cur.execute("""
                     SELECT sueldo_basico_formal, sueldo_basico_real FROM liquidaciones
                     WHERE id_empleado = %s AND (anio < %s OR (anio = %s AND mes <= %s))
@@ -2002,8 +2016,8 @@ def get_basicos_anteriores(mes: int, anio: int):
                 """, (e["id"], anio_prev, anio_prev, mes_prev))
                 prev = cur.fetchone()
 
-                # --- Básico FORMAL: primero la escala de convenio, si hay categoría + tenedores ---
-                basico_formal = None
+                # --- Referencia de Escala Formal (siempre se calcula, para poder avisar si el usuario se aparta) ---
+                escala_formal_ref = None
                 if e["id_puesto_formal_declarado"] and tenedores:
                     cur.execute("SELECT categoria_convenio FROM cat_puestos WHERE id = %s", (e["id_puesto_formal_declarado"],))
                     fp = cur.fetchone()
@@ -2016,30 +2030,43 @@ def get_basicos_anteriores(mes: int, anio: int):
                         """, (e["convenio"], fp["categoria_convenio"], tenedores, anio, anio, mes))
                         esc = cur.fetchone()
                         if esc:
-                            basico_formal = float(esc["basico"])
-                if basico_formal is None:
-                    basico_formal = float(prev["sueldo_basico_formal"]) if prev else 0
+                            escala_formal_ref = float(esc["basico"])
 
-                # --- Básico REAL: 1° su propio historial, 2° lo pactado al alta, 3° la Escala como último recurso ---
-                if prev and prev["sueldo_basico_real"] is not None:
+                # --- Básico FORMAL sugerido: 1° su propio historial, 2° la Escala como último recurso ---
+                if no_corresponde_formal:
+                    basico_formal = 0
+                elif prev and prev["sueldo_basico_formal"] is not None:
+                    basico_formal = float(prev["sueldo_basico_formal"])
+                elif escala_formal_ref is not None:
+                    basico_formal = escala_formal_ref
+                else:
+                    basico_formal = 0
+
+                # --- Referencia de Escala Real (siempre se calcula) ---
+                escala_real_ref = None
+                if e["id_puesto_real_declarado"]:
+                    cur.execute("""
+                        SELECT sueldo_estandar FROM escala_salarial_real
+                        WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                        ORDER BY anio DESC, mes DESC LIMIT 1
+                    """, (e["id_puesto_real_declarado"], anio, anio, mes))
+                    esc_r = cur.fetchone()
+                    if esc_r:
+                        escala_real_ref = float(esc_r["sueldo_estandar"])
+
+                # --- Básico REAL sugerido: 1° su propio historial, 2° lo pactado al alta, 3° la Escala ---
+                if no_corresponde_real:
+                    basico_real = 0
+                elif prev and prev["sueldo_basico_real"] is not None:
                     basico_real = float(prev["sueldo_basico_real"])
                 elif e["sueldo_basico"] is not None:
                     basico_real = float(e["sueldo_basico"])
                 elif prev:
                     basico_real = float(prev["sueldo_basico_formal"])
+                elif escala_real_ref is not None:
+                    basico_real = escala_real_ref
                 else:
-                    basico_real = None
-                    if e["id_puesto_real_declarado"]:
-                        cur.execute("""
-                            SELECT sueldo_estandar FROM escala_salarial_real
-                            WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
-                            ORDER BY anio DESC, mes DESC LIMIT 1
-                        """, (e["id_puesto_real_declarado"], anio, anio, mes))
-                        esc_r = cur.fetchone()
-                        if esc_r:
-                            basico_real = float(esc_r["sueldo_estandar"])
-                    if basico_real is None:
-                        basico_real = 0
+                    basico_real = 0
 
                 out.append({
                     "id_empleado": e["id"],
@@ -2047,6 +2074,10 @@ def get_basicos_anteriores(mes: int, anio: int):
                     "convenio": e["convenio"],
                     "sueldo_basico_formal": basico_formal,
                     "sueldo_basico_real": basico_real,
+                    "escala_formal_ref": escala_formal_ref,
+                    "escala_real_ref": escala_real_ref,
+                    "no_corresponde_formal": bool(no_corresponde_formal),
+                    "no_corresponde_real": bool(no_corresponde_real),
                 })
             return out
     finally:
