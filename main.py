@@ -1176,6 +1176,7 @@ class EmpleadoIn(BaseModel):
     alias_cbu: Optional[str] = None
     legajo: Optional[str] = None
     fecha_ingreso_afip: Optional[str] = None
+    alta_afip: Optional[bool] = False
     fecha_ingreso_real: Optional[str] = None
     jornada_real: Optional[str] = None
     jornada_formal: Optional[str] = None
@@ -1671,15 +1672,15 @@ def crear_empleado(e: EmpleadoIn):
                     (nombre, apellido, cuil, tipo_documento, nro_documento, nacionalidad, profesion, estado_civil,
                      categoria, convenio, sector, sector_detalle, turno, fecha_nacimiento, telefono, email,
                      banco, cbu, alias_cbu, legajo,
-                     fecha_ingreso_afip, fecha_ingreso_real, jornada_real, jornada_formal,
+                     fecha_ingreso_afip, fecha_ingreso_real, jornada_real, jornada_formal, alta_afip,
                      sueldo_basico, forma_pago, obra_social, sindicato, direccion,
                      dom_calle, dom_numero, dom_piso, dom_depto, dom_barrio, dom_localidad, dom_provincia, dom_codigo_postal,
                      id_puesto_formal_declarado, id_puesto_real_declarado, cuenta_patrimonial, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
-                  e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal,
+                  e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal, e.alta_afip,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
                   e.id_puesto_formal_declarado, e.id_puesto_real_declarado, e.cuenta_patrimonial, e.activo))
@@ -1698,7 +1699,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                     nombre=%s, apellido=%s, cuil=%s, tipo_documento=%s, nro_documento=%s, nacionalidad=%s, profesion=%s, estado_civil=%s,
                     categoria=%s, convenio=%s, sector=%s, sector_detalle=%s, turno=%s, fecha_nacimiento=%s, telefono=%s, email=%s,
                     banco=%s, cbu=%s, alias_cbu=%s, legajo=%s,
-                    fecha_ingreso_afip=%s, fecha_ingreso_real=%s, jornada_real=%s, jornada_formal=%s, sueldo_basico=%s,
+                    fecha_ingreso_afip=%s, fecha_ingreso_real=%s, jornada_real=%s, jornada_formal=%s, alta_afip=%s, sueldo_basico=%s,
                     forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
                     dom_calle=%s, dom_numero=%s, dom_piso=%s, dom_depto=%s, dom_barrio=%s, dom_localidad=%s, dom_provincia=%s, dom_codigo_postal=%s,
                     id_puesto_formal_declarado=%s, id_puesto_real_declarado=%s, cuenta_patrimonial=%s, activo=%s
@@ -1706,7 +1707,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
-                  e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal,
+                  e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal, e.alta_afip,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
                   e.id_puesto_formal_declarado, e.id_puesto_real_declarado, e.cuenta_patrimonial, e.activo, id))
