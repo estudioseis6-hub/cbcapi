@@ -1977,13 +1977,21 @@ def get_liquidaciones(mes: Optional[int] = None, anio: Optional[int] = None, id_
 
 @app.get("/liquidaciones/basicos_anteriores")
 def get_basicos_anteriores(mes: int, anio: int):
-    """Para cada empleado activo, trae el último Básico (Formal/Real) que usó ANTES de mes/año.
-    Si nunca liquidó, usa empleados.sueldo_basico como arranque."""
+    """Para cada empleado activo, intenta traer el Básico Formal/Real desde las escalas
+    (según su Categoría/Posición declarada). Si no hay dato en la escala para ese empleado,
+    cae al criterio viejo: el último Básico que usó en una liquidación anterior, o el de alta."""
     mes_prev, anio_prev = (12, anio - 1) if mes == 1 else (mes - 1, anio)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, nombre, convenio, sueldo_basico FROM empleados WHERE activo = true ORDER BY nombre")
+            cur.execute("SELECT valor FROM configuracion WHERE clave = 'tenedores_establecimiento'")
+            row = cur.fetchone()
+            tenedores = int(row["valor"]) if row and row["valor"] else None
+
+            cur.execute("""
+                SELECT id, nombre, convenio, sueldo_basico, id_puesto_formal_declarado, id_puesto_real_declarado
+                FROM empleados WHERE activo = true ORDER BY nombre
+            """)
             empleados = cur.fetchall()
             out = []
             for e in empleados:
@@ -1993,12 +2001,45 @@ def get_basicos_anteriores(mes: int, anio: int):
                     ORDER BY anio DESC, mes DESC LIMIT 1
                 """, (e["id"], anio_prev, anio_prev, mes_prev))
                 prev = cur.fetchone()
+
+                # --- Básico FORMAL: primero la escala de convenio, si hay categoría + tenedores ---
+                basico_formal = None
+                if e["id_puesto_formal_declarado"] and tenedores:
+                    cur.execute("SELECT categoria_convenio FROM cat_puestos WHERE id = %s", (e["id_puesto_formal_declarado"],))
+                    fp = cur.fetchone()
+                    if fp and fp["categoria_convenio"] is not None:
+                        cur.execute("""
+                            SELECT basico FROM escala_salarial
+                            WHERE convenio = %s AND categoria_convenio = %s AND tenedores = %s
+                              AND (anio < %s OR (anio = %s AND mes <= %s))
+                            ORDER BY anio DESC, mes DESC LIMIT 1
+                        """, (e["convenio"], fp["categoria_convenio"], tenedores, anio, anio, mes))
+                        esc = cur.fetchone()
+                        if esc:
+                            basico_formal = float(esc["basico"])
+                if basico_formal is None:
+                    basico_formal = float(prev["sueldo_basico_formal"]) if prev else 0
+
+                # --- Básico REAL: primero la escala de la posición Real ---
+                basico_real = None
+                if e["id_puesto_real_declarado"]:
+                    cur.execute("""
+                        SELECT sueldo_estandar FROM escala_salarial_real
+                        WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                        ORDER BY anio DESC, mes DESC LIMIT 1
+                    """, (e["id_puesto_real_declarado"], anio, anio, mes))
+                    esc_r = cur.fetchone()
+                    if esc_r:
+                        basico_real = float(esc_r["sueldo_estandar"])
+                if basico_real is None:
+                    basico_real = float(prev["sueldo_basico_real"]) if (prev and prev["sueldo_basico_real"] is not None) else (float(prev["sueldo_basico_formal"]) if prev else float(e["sueldo_basico"] or 0))
+
                 out.append({
                     "id_empleado": e["id"],
                     "nombre": e["nombre"],
                     "convenio": e["convenio"],
-                    "sueldo_basico_formal": float(prev["sueldo_basico_formal"]) if prev else 0,
-                    "sueldo_basico_real": float(prev["sueldo_basico_real"]) if (prev and prev["sueldo_basico_real"] is not None) else (float(prev["sueldo_basico_formal"]) if prev else float(e["sueldo_basico"] or 0)),
+                    "sueldo_basico_formal": basico_formal,
+                    "sueldo_basico_real": basico_real,
                 })
             return out
     finally:
