@@ -1193,6 +1193,8 @@ class EmpleadoIn(BaseModel):
     dom_provincia: Optional[str] = None
     dom_codigo_postal: Optional[str] = None
     cuenta_patrimonial: Optional[str] = "Remuneraciones a Pagar — Sueldos"
+    id_puesto_formal_declarado: Optional[int] = None
+    id_puesto_real_declarado: Optional[int] = None
     activo: Optional[bool] = True
 
 # ==========================================
@@ -1672,15 +1674,15 @@ def crear_empleado(e: EmpleadoIn):
                      fecha_ingreso_afip, fecha_ingreso_real, jornada_real, jornada_formal,
                      sueldo_basico, forma_pago, obra_social, sindicato, direccion,
                      dom_calle, dom_numero, dom_piso, dom_depto, dom_barrio, dom_localidad, dom_provincia, dom_codigo_postal,
-                     id_puesto_formal_declarado, cuenta_patrimonial, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     id_puesto_formal_declarado, id_puesto_real_declarado, cuenta_patrimonial, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
                   e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
-                  e.id_puesto_formal_declarado, e.cuenta_patrimonial, e.activo))
+                  e.id_puesto_formal_declarado, e.id_puesto_real_declarado, e.cuenta_patrimonial, e.activo))
         conn.commit()
         return {"ok": True}
     finally:
@@ -1699,7 +1701,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                     fecha_ingreso_afip=%s, fecha_ingreso_real=%s, jornada_real=%s, jornada_formal=%s, sueldo_basico=%s,
                     forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
                     dom_calle=%s, dom_numero=%s, dom_piso=%s, dom_depto=%s, dom_barrio=%s, dom_localidad=%s, dom_provincia=%s, dom_codigo_postal=%s,
-                    id_puesto_formal_declarado=%s, cuenta_patrimonial=%s, activo=%s
+                    id_puesto_formal_declarado=%s, id_puesto_real_declarado=%s, cuenta_patrimonial=%s, activo=%s
                 WHERE id=%s
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
@@ -1707,7 +1709,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                   e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal,
                   e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
-                  e.id_puesto_formal_declarado, e.cuenta_patrimonial, e.activo, id))
+                  e.id_puesto_formal_declarado, e.id_puesto_real_declarado, e.cuenta_patrimonial, e.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
