@@ -1284,16 +1284,31 @@ class EscalaSalarialIn(BaseModel):
 
 @app.get("/escala_salarial")
 def get_escala_salarial(mes: int, anio: int, convenio: Optional[str] = None):
+    """Para cada combinación categoría x tenedores ya cargada alguna vez, trae el valor de
+    este mes si existe, o si no, el último anterior (mismo criterio que escala_salarial_real)."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            where = "WHERE mes = %s AND anio = %s"
-            params = [mes, anio]
-            if convenio:
-                where += " AND convenio = %s"
-                params.append(convenio)
-            cur.execute(f"SELECT * FROM escala_salarial {where} ORDER BY categoria_convenio, tenedores", params)
-            return cur.fetchall()
+            where = "WHERE convenio = %s" if convenio else "WHERE 1=1"
+            params = [convenio] if convenio else []
+            cur.execute(f"SELECT DISTINCT convenio, categoria_convenio, tenedores FROM escala_salarial {where}", params)
+            combinaciones = cur.fetchall()
+            out = []
+            for c in combinaciones:
+                cur.execute("""
+                    SELECT basico, suma_no_remunerativa, mes AS mes_origen, anio AS anio_origen FROM escala_salarial
+                    WHERE convenio = %s AND categoria_convenio = %s AND tenedores = %s
+                      AND (anio < %s OR (anio = %s AND mes <= %s))
+                    ORDER BY anio DESC, mes DESC LIMIT 1
+                """, (c["convenio"], c["categoria_convenio"], c["tenedores"], anio, anio, mes))
+                row = cur.fetchone()
+                if row:
+                    out.append({
+                        "convenio": c["convenio"], "categoria_convenio": c["categoria_convenio"], "tenedores": c["tenedores"],
+                        "basico": float(row["basico"]), "suma_no_remunerativa": float(row["suma_no_remunerativa"]) if row["suma_no_remunerativa"] is not None else None,
+                        "mes": mes, "anio": anio,
+                    })
+            return out
     finally:
         conn.close()
 
