@@ -1203,6 +1203,7 @@ class PuestoIn(BaseModel):
     nivel: str
     sector: Optional[str] = None
     posicion: str
+    categoria_convenio: Optional[int] = None
     activo: Optional[bool] = True
 
 @app.get("/cat_puestos")
@@ -1214,10 +1215,10 @@ def get_cat_puestos(convenio: Optional[str] = None):
                 cur.execute("""
                     SELECT * FROM cat_puestos
                     WHERE (convenio = %s OR convenio = 'GENERAL') AND activo = true
-                    ORDER BY nivel, sector NULLS FIRST, posicion
+                    ORDER BY categoria_convenio NULLS LAST, nivel, sector NULLS FIRST, posicion
                 """, (convenio,))
             else:
-                cur.execute("SELECT * FROM cat_puestos ORDER BY convenio, nivel, sector NULLS FIRST, posicion")
+                cur.execute("SELECT * FROM cat_puestos ORDER BY convenio, categoria_convenio NULLS LAST, nivel, sector NULLS FIRST, posicion")
             return cur.fetchall()
     finally:
         conn.close()
@@ -1229,9 +1230,9 @@ def crear_puesto(p: PuestoIn):
         with conn.cursor() as cur:
             try:
                 cur.execute("""
-                    INSERT INTO cat_puestos (convenio, nivel, sector, posicion, activo)
-                    VALUES (%s,%s,%s,%s,%s)
-                """, (p.convenio, p.nivel, p.sector, p.posicion, p.activo))
+                    INSERT INTO cat_puestos (convenio, nivel, sector, posicion, categoria_convenio, activo)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                """, (p.convenio, p.nivel, p.sector, p.posicion, p.categoria_convenio, p.activo))
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
                 return {"ok": False, "error": "Ese puesto ya existe para ese convenio/nivel/sector."}
@@ -1246,9 +1247,9 @@ def actualizar_puesto(id: int, p: PuestoIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE cat_puestos SET convenio=%s, nivel=%s, sector=%s, posicion=%s, activo=%s
+                UPDATE cat_puestos SET convenio=%s, nivel=%s, sector=%s, posicion=%s, categoria_convenio=%s, activo=%s
                 WHERE id=%s
-            """, (p.convenio, p.nivel, p.sector, p.posicion, p.activo, id))
+            """, (p.convenio, p.nivel, p.sector, p.posicion, p.categoria_convenio, p.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -1265,6 +1266,99 @@ def eliminar_puesto(id: int):
             cur.execute("DELETE FROM cat_puestos WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+# ==========================================
+# ESCALA SALARIAL FORMAL — sueldo mínimo de convenio, por categoría x tenedores x mes
+# ==========================================
+class EscalaSalarialIn(BaseModel):
+    convenio: str
+    categoria_convenio: int
+    tenedores: int
+    mes: int
+    anio: int
+    basico: float
+    suma_no_remunerativa: Optional[float] = None
+
+@app.get("/escala_salarial")
+def get_escala_salarial(mes: int, anio: int, convenio: Optional[str] = None):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = "WHERE mes = %s AND anio = %s"
+            params = [mes, anio]
+            if convenio:
+                where += " AND convenio = %s"
+                params.append(convenio)
+            cur.execute(f"SELECT * FROM escala_salarial {where} ORDER BY categoria_convenio, tenedores", params)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/escala_salarial")
+def guardar_escala_salarial(e: EscalaSalarialIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (e.mes, e.anio))
+            if cur.fetchone()["n"] > 0:
+                return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede modificar la escala de convenio de un mes ya liquidado."}
+            cur.execute("""
+                INSERT INTO escala_salarial (convenio, categoria_convenio, tenedores, mes, anio, basico, suma_no_remunerativa)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (convenio, categoria_convenio, tenedores, mes, anio)
+                DO UPDATE SET basico = EXCLUDED.basico, suma_no_remunerativa = EXCLUDED.suma_no_remunerativa
+            """, (e.convenio, e.categoria_convenio, e.tenedores, e.mes, e.anio, e.basico, e.suma_no_remunerativa))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+class AumentoFormalIn(BaseModel):
+    convenio: str
+    mes: int
+    anio: int
+    porcentaje: float
+
+@app.post("/escala_salarial/aumento")
+def aplicar_aumento_formal(a: AumentoFormalIn):
+    """Aplica un % de aumento a toda la escala Formal de un convenio, tomando como base
+    la última combinación categoría x tenedores cargada (mismo mes o el más reciente anterior)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (a.mes, a.anio))
+            if cur.fetchone()["n"] > 0:
+                return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede aplicar un aumento sobre un mes ya liquidado."}
+            cur.execute("""
+                SELECT DISTINCT categoria_convenio, tenedores FROM escala_salarial
+                WHERE convenio = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+            """, (a.convenio, a.anio, a.anio, a.mes))
+            combinaciones = cur.fetchall()
+            actualizadas = 0
+            for c in combinaciones:
+                cur.execute("""
+                    SELECT basico, suma_no_remunerativa FROM escala_salarial
+                    WHERE convenio = %s AND categoria_convenio = %s AND tenedores = %s
+                      AND (anio < %s OR (anio = %s AND mes <= %s))
+                    ORDER BY anio DESC, mes DESC LIMIT 1
+                """, (a.convenio, c["categoria_convenio"], c["tenedores"], a.anio, a.anio, a.mes))
+                row = cur.fetchone()
+                if not row:
+                    continue
+                nuevo_basico = round(float(row["basico"]) * (1 + a.porcentaje / 100), 2)
+                nueva_suma = round(float(row["suma_no_remunerativa"]) * (1 + a.porcentaje / 100), 2) if row["suma_no_remunerativa"] is not None else None
+                cur.execute("""
+                    INSERT INTO escala_salarial (convenio, categoria_convenio, tenedores, mes, anio, basico, suma_no_remunerativa)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (convenio, categoria_convenio, tenedores, mes, anio)
+                    DO UPDATE SET basico = EXCLUDED.basico, suma_no_remunerativa = EXCLUDED.suma_no_remunerativa
+                """, (a.convenio, c["categoria_convenio"], c["tenedores"], a.mes, a.anio, nuevo_basico, nueva_suma))
+                actualizadas += 1
+        conn.commit()
+        return {"ok": True, "actualizadas": actualizadas}
     finally:
         conn.close()
 
@@ -1503,6 +1597,36 @@ def get_formales_de_real(id: int):
                 ORDER BY f.categoria_convenio DESC, f.posicion
             """, (id,))
             return cur.fetchall()
+    finally:
+        conn.close()
+
+class RelacionRealFormalIn(BaseModel):
+    id_real: int
+    id_formal: int
+
+@app.post("/cat_puestos_reales_formal")
+def agregar_relacion_real_formal(r: RelacionRealFormalIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("INSERT INTO cat_puestos_reales_formal (id_real, id_formal) VALUES (%s,%s)", (r.id_real, r.id_formal))
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                return {"ok": False, "error": "Esa relación ya existe."}
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.delete("/cat_puestos_reales_formal")
+def eliminar_relacion_real_formal(id_real: int, id_formal: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cat_puestos_reales_formal WHERE id_real = %s AND id_formal = %s", (id_real, id_formal))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
