@@ -2651,6 +2651,33 @@ def get_total_cheques_apertura():
     finally:
         conn.close()
 
+@app.get("/estado_configuracion")
+def get_estado_configuracion():
+    """Para cada paso del checklist, chequea si el sistema realmente tiene datos cargados ahí —
+    no se le pregunta al usuario, se va a mirar la base directamente."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM saldos_iniciales")
+            saldos_iniciales = cur.fetchone()["n"] > 0
+            cur.execute("SELECT COUNT(*) AS n FROM titulares")
+            titulares = cur.fetchone()["n"] > 0
+            cur.execute("SELECT COUNT(*) AS n FROM fondos WHERE es_sistema = false")
+            fondos = cur.fetchone()["n"] > 0
+            cur.execute("SELECT COUNT(*) AS n FROM empleados")
+            empleados = cur.fetchone()["n"] > 0
+            cur.execute("SELECT COUNT(*) AS n FROM conceptos_liquidacion WHERE convenio != 'GENERAL'")
+            conceptos_liquidacion = cur.fetchone()["n"] > 0
+            return {
+                "saldos_iniciales": saldos_iniciales,
+                "titulares": titulares,
+                "fondos": fondos,
+                "empleados": empleados,
+                "conceptos_liquidacion": conceptos_liquidacion,
+            }
+    finally:
+        conn.close()
+
 @app.get("/configuracion")
 def get_configuracion():
     conn = get_conn()
