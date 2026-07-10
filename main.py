@@ -1721,6 +1721,18 @@ def eliminar_empleado(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE id_empleado = %s", (id,))
+            n_liq = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM cashflow WHERE id_empleado = %s", (id,))
+            n_cash = cur.fetchone()["n"]
+            if n_liq > 0 or n_cash > 0:
+                partes = []
+                if n_liq > 0:
+                    partes.append(f"{n_liq} liquidación(es)")
+                if n_cash > 0:
+                    partes.append(f"{n_cash} movimiento(s) de pago")
+                return {"ok": False, "error": "No se puede eliminar: este empleado ya generó " + " y ".join(partes) + " — eso afectó el Balance. Si ya no trabaja más acá, marcalo como \"Inactivo\" en vez de eliminarlo."}
+            cur.execute("DELETE FROM empleados_familiares WHERE id_empleado = %s", (id,))
             cur.execute("DELETE FROM empleados WHERE id = %s", (id,))
         conn.commit()
         return {"ok": True}
