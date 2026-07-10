@@ -2020,19 +2020,26 @@ def get_basicos_anteriores(mes: int, anio: int):
                 if basico_formal is None:
                     basico_formal = float(prev["sueldo_basico_formal"]) if prev else 0
 
-                # --- Básico REAL: primero la escala de la posición Real ---
-                basico_real = None
-                if e["id_puesto_real_declarado"]:
-                    cur.execute("""
-                        SELECT sueldo_estandar FROM escala_salarial_real
-                        WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
-                        ORDER BY anio DESC, mes DESC LIMIT 1
-                    """, (e["id_puesto_real_declarado"], anio, anio, mes))
-                    esc_r = cur.fetchone()
-                    if esc_r:
-                        basico_real = float(esc_r["sueldo_estandar"])
-                if basico_real is None:
-                    basico_real = float(prev["sueldo_basico_real"]) if (prev and prev["sueldo_basico_real"] is not None) else (float(prev["sueldo_basico_formal"]) if prev else float(e["sueldo_basico"] or 0))
+                # --- Básico REAL: 1° su propio historial, 2° lo pactado al alta, 3° la Escala como último recurso ---
+                if prev and prev["sueldo_basico_real"] is not None:
+                    basico_real = float(prev["sueldo_basico_real"])
+                elif e["sueldo_basico"] is not None:
+                    basico_real = float(e["sueldo_basico"])
+                elif prev:
+                    basico_real = float(prev["sueldo_basico_formal"])
+                else:
+                    basico_real = None
+                    if e["id_puesto_real_declarado"]:
+                        cur.execute("""
+                            SELECT sueldo_estandar FROM escala_salarial_real
+                            WHERE id_real = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                            ORDER BY anio DESC, mes DESC LIMIT 1
+                        """, (e["id_puesto_real_declarado"], anio, anio, mes))
+                        esc_r = cur.fetchone()
+                        if esc_r:
+                            basico_real = float(esc_r["sueldo_estandar"])
+                    if basico_real is None:
+                        basico_real = 0
 
                 out.append({
                     "id_empleado": e["id"],
