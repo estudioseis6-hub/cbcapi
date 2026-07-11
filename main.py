@@ -1928,7 +1928,7 @@ def _get_config_num(cur, clave, default):
     row = cur.fetchone()
     return float(row["valor"]) if row else default
 
-def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, aportes_pct_total=0.0):
+def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, aportes_pct_total=0.0, es_caba=False):
     """Devuelve lista de detalle [(id_concepto, nombre, tipo, monto)] y el neto de ese track.
     Los Aportes se calculan aparte, en una segunda pasada, porque van sobre el Bruto ya armado
     (sueldo + adicionales), no sobre el básico solo."""
@@ -1951,6 +1951,8 @@ def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_
             monto = (sueldo_basico / divisor_feriado) * feriados if divisor_feriado else 0.0
         elif nombre == "Ausencias No Justificadas":
             monto = (sueldo_basico / divisor_dia) * aus_no_just if divisor_dia else 0.0
+        elif nombre == "Plus CABA":
+            monto = sueldo_basico * float(c["porcentaje"] or 0) if es_caba else 0.0
         elif c["calculo"] == "AUTOMATICO" and c["porcentaje"] is not None:
             monto = sueldo_basico * float(c["porcentaje"])
         else:
@@ -2006,13 +2008,16 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
                 _get_config_num(cur, "aporte_ley19032_pct", 3) +
                 _get_config_num(cur, "aporte_obra_social_pct", 3)
             ) / 100
+            cur.execute("SELECT valor FROM configuracion WHERE clave = 'caba'")
+            row_caba = cur.fetchone()
+            es_caba = bool(row_caba and row_caba["valor"] == "SI")
 
         manuales = _parse_manuales(l.manuales)
 
         detalle_formal, bruto_formal, neto_formal = _calcular_track(
             conceptos, "FORMAL", l.sueldo_basico_formal, l.feriados_trabajados,
             l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia,
-            aportes_pct_total
+            aportes_pct_total, es_caba
         )
 
         detalle_real, bruto_real, neto_real = None, None, None
@@ -2021,7 +2026,7 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
             detalle_real, bruto_real, neto_real = _calcular_track(
                 conceptos, "REAL", l.sueldo_basico_real, l.feriados_trabajados,
                 l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia,
-                aportes_pct_total
+                aportes_pct_total, es_caba
             )
             pago_efectivo = round(neto_real - neto_formal, 2)
 
