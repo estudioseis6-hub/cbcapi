@@ -1181,6 +1181,7 @@ class EmpleadoIn(BaseModel):
     jornada_real: Optional[str] = None
     jornada_formal: Optional[str] = None
     sueldo_basico: Optional[float] = None
+    sueldo_basico_formal_alta: Optional[float] = None
     forma_pago: Optional[str] = None
     obra_social: Optional[str] = None
     sindicato: Optional[str] = None
@@ -1601,6 +1602,35 @@ def get_sueldo_actual_real(id: int):
     finally:
         conn.close()
 
+@app.get("/cat_puestos/{id}/minimo_actual")
+def get_minimo_actual_formal(id: int):
+    """Mínimo de convenio vigente hoy para esta Categoría Formal, según los Tenedores configurados
+    (para autocompletar y validar en el alta de empleados)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT valor FROM configuracion WHERE clave = 'tenedores_establecimiento'")
+            row = cur.fetchone()
+            tenedores = int(row["valor"]) if row and row["valor"] else None
+            if not tenedores:
+                return {"basico": None}
+            cur.execute("SELECT convenio, categoria_convenio FROM cat_puestos WHERE id = %s", (id,))
+            p = cur.fetchone()
+            if not p or p["categoria_convenio"] is None:
+                return {"basico": None}
+            from datetime import date as _date
+            hoy = _date.today()
+            cur.execute("""
+                SELECT basico FROM escala_salarial
+                WHERE convenio = %s AND categoria_convenio = %s AND tenedores = %s
+                  AND (anio < %s OR (anio = %s AND mes <= %s))
+                ORDER BY anio DESC, mes DESC LIMIT 1
+            """, (p["convenio"], p["categoria_convenio"], tenedores, hoy.year, hoy.year, hoy.month))
+            esc = cur.fetchone()
+            return {"basico": float(esc["basico"]) if esc else None}
+    finally:
+        conn.close()
+
 @app.get("/cat_puestos_reales/{id}/formales")
 def get_formales_de_real(id: int):
     """Devuelve las posiciones Formales permitidas para una posición Real, ordenadas de mayor a menor jerarquía."""
@@ -1662,26 +1692,56 @@ def get_empleados():
     finally:
         conn.close()
 
+def _validar_sueldo_formal_minimo(cur, e):
+    """Si el empleado tiene Categoría Formal y sueldo declarado, chequea que no sea menor
+    al mínimo de convenio vigente. Devuelve un mensaje de error si lo viola, o None si está OK."""
+    if e.sueldo_basico_formal_alta is None or not e.id_puesto_formal_declarado:
+        return None
+    cur.execute("SELECT valor FROM configuracion WHERE clave = 'tenedores_establecimiento'")
+    row = cur.fetchone()
+    tenedores = int(row["valor"]) if row and row["valor"] else None
+    if not tenedores:
+        return None
+    cur.execute("SELECT categoria_convenio FROM cat_puestos WHERE id = %s", (e.id_puesto_formal_declarado,))
+    fp = cur.fetchone()
+    if not fp or fp["categoria_convenio"] is None:
+        return None
+    from datetime import date as _date
+    hoy = _date.today()
+    cur.execute("""
+        SELECT basico FROM escala_salarial
+        WHERE convenio = %s AND categoria_convenio = %s AND tenedores = %s
+          AND (anio < %s OR (anio = %s AND mes <= %s))
+        ORDER BY anio DESC, mes DESC LIMIT 1
+    """, (e.convenio, fp["categoria_convenio"], tenedores, hoy.year, hoy.year, hoy.month))
+    esc = cur.fetchone()
+    if esc and e.sueldo_basico_formal_alta < float(esc["basico"]):
+        return f"No se puede declarar un sueldo Formal menor al mínimo de convenio (${esc['basico']})."
+    return None
+
 @app.post("/empleados")
 def crear_empleado(e: EmpleadoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            error_minimo = _validar_sueldo_formal_minimo(cur, e)
+            if error_minimo:
+                return {"ok": False, "error": error_minimo}
             cur.execute("""
                 INSERT INTO empleados
                     (nombre, apellido, cuil, tipo_documento, nro_documento, nacionalidad, profesion, estado_civil,
                      categoria, convenio, sector, sector_detalle, turno, fecha_nacimiento, telefono, email,
                      banco, cbu, alias_cbu, legajo,
                      fecha_ingreso_afip, fecha_ingreso_real, jornada_real, jornada_formal, alta_afip,
-                     sueldo_basico, forma_pago, obra_social, sindicato, direccion,
+                     sueldo_basico, sueldo_basico_formal_alta, forma_pago, obra_social, sindicato, direccion,
                      dom_calle, dom_numero, dom_piso, dom_depto, dom_barrio, dom_localidad, dom_provincia, dom_codigo_postal,
                      id_puesto_formal_declarado, id_puesto_real_declarado, cuenta_patrimonial, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (e.nombre, e.apellido, e.cuil, e.tipo_documento, e.nro_documento, e.nacionalidad, e.profesion, e.estado_civil,
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
                   e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal, e.alta_afip,
-                  e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
+                  e.sueldo_basico, e.sueldo_basico_formal_alta, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
                   e.id_puesto_formal_declarado, e.id_puesto_real_declarado, e.cuenta_patrimonial, e.activo))
         conn.commit()
@@ -1694,12 +1754,15 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            error_minimo = _validar_sueldo_formal_minimo(cur, e)
+            if error_minimo:
+                return {"ok": False, "error": error_minimo}
             cur.execute("""
                 UPDATE empleados SET
                     nombre=%s, apellido=%s, cuil=%s, tipo_documento=%s, nro_documento=%s, nacionalidad=%s, profesion=%s, estado_civil=%s,
                     categoria=%s, convenio=%s, sector=%s, sector_detalle=%s, turno=%s, fecha_nacimiento=%s, telefono=%s, email=%s,
                     banco=%s, cbu=%s, alias_cbu=%s, legajo=%s,
-                    fecha_ingreso_afip=%s, fecha_ingreso_real=%s, jornada_real=%s, jornada_formal=%s, alta_afip=%s, sueldo_basico=%s,
+                    fecha_ingreso_afip=%s, fecha_ingreso_real=%s, jornada_real=%s, jornada_formal=%s, alta_afip=%s, sueldo_basico=%s, sueldo_basico_formal_alta=%s,
                     forma_pago=%s, obra_social=%s, sindicato=%s, direccion=%s,
                     dom_calle=%s, dom_numero=%s, dom_piso=%s, dom_depto=%s, dom_barrio=%s, dom_localidad=%s, dom_provincia=%s, dom_codigo_postal=%s,
                     id_puesto_formal_declarado=%s, id_puesto_real_declarado=%s, cuenta_patrimonial=%s, activo=%s
@@ -1708,7 +1771,7 @@ def actualizar_empleado(id: int, e: EmpleadoIn):
                   e.categoria, e.convenio, e.sector, e.sector_detalle, e.turno, e.fecha_nacimiento, e.telefono, e.email,
                   e.banco, e.cbu, e.alias_cbu, e.legajo,
                   e.fecha_ingreso_afip, e.fecha_ingreso_real, e.jornada_real, e.jornada_formal, e.alta_afip,
-                  e.sueldo_basico, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
+                  e.sueldo_basico, e.sueldo_basico_formal_alta, e.forma_pago, e.obra_social, e.sindicato, e.direccion,
                   e.dom_calle, e.dom_numero, e.dom_piso, e.dom_depto, e.dom_barrio, e.dom_localidad, e.dom_provincia, e.dom_codigo_postal,
                   e.id_puesto_formal_declarado, e.id_puesto_real_declarado, e.cuenta_patrimonial, e.activo, id))
         conn.commit()
@@ -2022,7 +2085,7 @@ def get_basicos_anteriores(mes: int, anio: int):
             tenedores = int(row["valor"]) if row and row["valor"] else None
 
             cur.execute("""
-                SELECT id, nombre, convenio, sueldo_basico, id_puesto_formal_declarado, id_puesto_real_declarado,
+                SELECT id, nombre, convenio, sueldo_basico, sueldo_basico_formal_alta, id_puesto_formal_declarado, id_puesto_real_declarado,
                        fecha_ingreso_afip, fecha_ingreso_real
                 FROM empleados WHERE activo = true ORDER BY nombre
             """)
@@ -2065,11 +2128,13 @@ def get_basicos_anteriores(mes: int, anio: int):
                         if esc:
                             escala_formal_ref = float(esc["basico"])
 
-                # --- Básico FORMAL sugerido: 1° su propio historial, 2° la Escala como último recurso ---
+                # --- Básico FORMAL sugerido: 1° su propio historial, 2° lo declarado al alta, 3° la Escala ---
                 if no_corresponde_formal:
                     basico_formal = 0
                 elif prev and prev["sueldo_basico_formal"] is not None:
                     basico_formal = float(prev["sueldo_basico_formal"])
+                elif e["sueldo_basico_formal_alta"] is not None:
+                    basico_formal = float(e["sueldo_basico_formal_alta"])
                 elif escala_formal_ref is not None:
                     basico_formal = escala_formal_ref
                 else:
