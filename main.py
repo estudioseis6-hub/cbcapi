@@ -2180,16 +2180,22 @@ def get_basicos_anteriores(mes: int, anio: int):
                 else:
                     basico_real = 0
 
+                # La referencia de "jornada completa" prioriza lo declarado específicamente para
+                # este empleado (el campo del modal es el que manda) — la Escala es solo el respaldo
+                # si nunca se declaró nada puntual.
+                referencia_formal_jornada_completa = float(e["sueldo_basico_formal_alta"]) if e["sueldo_basico_formal_alta"] is not None else escala_formal_ref
+                referencia_real_jornada_completa = float(e["sueldo_basico"]) if e["sueldo_basico"] is not None else escala_real_ref
+
                 out.append({
                     "id_empleado": e["id"],
                     "nombre": e["nombre"],
                     "convenio": e["convenio"],
                     "sueldo_basico_formal": basico_formal,
                     "sueldo_basico_real": basico_real,
-                    "escala_formal_ref": round(escala_formal_ref * proporcion_formal, 2) if escala_formal_ref is not None else None,
-                    "escala_real_ref": round(escala_real_ref * proporcion_real, 2) if escala_real_ref is not None else None,
-                    "escala_formal_ref_jornada_completa": escala_formal_ref,
-                    "escala_real_ref_jornada_completa": escala_real_ref,
+                    "escala_formal_ref": round(referencia_formal_jornada_completa * proporcion_formal, 2) if referencia_formal_jornada_completa is not None else None,
+                    "escala_real_ref": round(referencia_real_jornada_completa * proporcion_real, 2) if referencia_real_jornada_completa is not None else None,
+                    "escala_formal_ref_jornada_completa": referencia_formal_jornada_completa,
+                    "escala_real_ref_jornada_completa": referencia_real_jornada_completa,
                     "no_corresponde_formal": bool(no_corresponde_formal),
                     "no_corresponde_real": bool(no_corresponde_real),
                     "horas_formal": horas_formal,
