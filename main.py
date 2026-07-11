@@ -1178,8 +1178,8 @@ class EmpleadoIn(BaseModel):
     fecha_ingreso_afip: Optional[str] = None
     alta_afip: Optional[bool] = False
     fecha_ingreso_real: Optional[str] = None
-    jornada_real: Optional[str] = None
-    jornada_formal: Optional[str] = None
+    jornada_real: Optional[float] = 192
+    jornada_formal: Optional[float] = 192
     sueldo_basico: Optional[float] = None
     sueldo_basico_formal_alta: Optional[float] = None
     forma_pago: Optional[str] = None
@@ -1979,6 +1979,8 @@ class LiquidacionCalcularIn(BaseModel):
     convenio: str
     sueldo_basico_formal: float
     sueldo_basico_real: Optional[float] = None
+    horas_formal: Optional[float] = 192
+    horas_real: Optional[float] = 192
     feriados_trabajados: int = 0
     ausencias_justificadas: int = 0
     ausencias_no_justificadas: int = 0
@@ -2092,7 +2094,7 @@ def get_basicos_anteriores(mes: int, anio: int):
 
             cur.execute("""
                 SELECT id, nombre, convenio, sueldo_basico, sueldo_basico_formal_alta, id_puesto_formal_declarado, id_puesto_real_declarado,
-                       fecha_ingreso_afip, fecha_ingreso_real
+                       fecha_ingreso_afip, fecha_ingreso_real, jornada_real, jornada_formal
                 FROM empleados WHERE activo = true ORDER BY nombre
             """)
             empleados = cur.fetchall()
@@ -2112,11 +2114,17 @@ def get_basicos_anteriores(mes: int, anio: int):
                     continue
 
                 cur.execute("""
-                    SELECT sueldo_basico_formal, sueldo_basico_real FROM liquidaciones
+                    SELECT sueldo_basico_formal, sueldo_basico_real, horas_formal, horas_real FROM liquidaciones
                     WHERE id_empleado = %s AND (anio < %s OR (anio = %s AND mes <= %s))
                     ORDER BY anio DESC, mes DESC LIMIT 1
                 """, (e["id"], anio_prev, anio_prev, mes_prev))
                 prev = cur.fetchone()
+
+                # Jornada sugerida: 1° la que venía usando en liquidaciones, 2° la declarada al alta, 3° 192hs (completa)
+                horas_formal = float(prev["horas_formal"]) if (prev and prev["horas_formal"] is not None) else float(e["jornada_formal"] or 192)
+                horas_real = float(prev["horas_real"]) if (prev and prev["horas_real"] is not None) else float(e["jornada_real"] or 192)
+                proporcion_formal = horas_formal / 192
+                proporcion_real = horas_real / 192
 
                 # --- Referencia de Escala Formal (siempre se calcula, para poder avisar si el usuario se aparta) ---
                 escala_formal_ref = None
@@ -2140,9 +2148,9 @@ def get_basicos_anteriores(mes: int, anio: int):
                 elif prev and prev["sueldo_basico_formal"] is not None:
                     basico_formal = float(prev["sueldo_basico_formal"])
                 elif e["sueldo_basico_formal_alta"] is not None:
-                    basico_formal = float(e["sueldo_basico_formal_alta"])
+                    basico_formal = round(float(e["sueldo_basico_formal_alta"]) * proporcion_formal, 2)
                 elif escala_formal_ref is not None:
-                    basico_formal = escala_formal_ref
+                    basico_formal = round(escala_formal_ref * proporcion_formal, 2)
                 else:
                     basico_formal = 0
 
@@ -2164,11 +2172,11 @@ def get_basicos_anteriores(mes: int, anio: int):
                 elif prev and prev["sueldo_basico_real"] is not None:
                     basico_real = float(prev["sueldo_basico_real"])
                 elif e["sueldo_basico"] is not None:
-                    basico_real = float(e["sueldo_basico"])
+                    basico_real = round(float(e["sueldo_basico"]) * proporcion_real, 2)
                 elif prev:
                     basico_real = float(prev["sueldo_basico_formal"])
                 elif escala_real_ref is not None:
-                    basico_real = escala_real_ref
+                    basico_real = round(escala_real_ref * proporcion_real, 2)
                 else:
                     basico_real = 0
 
@@ -2178,10 +2186,14 @@ def get_basicos_anteriores(mes: int, anio: int):
                     "convenio": e["convenio"],
                     "sueldo_basico_formal": basico_formal,
                     "sueldo_basico_real": basico_real,
-                    "escala_formal_ref": escala_formal_ref,
-                    "escala_real_ref": escala_real_ref,
+                    "escala_formal_ref": round(escala_formal_ref * proporcion_formal, 2) if escala_formal_ref is not None else None,
+                    "escala_real_ref": round(escala_real_ref * proporcion_real, 2) if escala_real_ref is not None else None,
+                    "escala_formal_ref_jornada_completa": escala_formal_ref,
+                    "escala_real_ref_jornada_completa": escala_real_ref,
                     "no_corresponde_formal": bool(no_corresponde_formal),
                     "no_corresponde_real": bool(no_corresponde_real),
+                    "horas_formal": horas_formal,
+                    "horas_real": horas_real,
                 })
             return out
     finally:
@@ -2225,13 +2237,15 @@ def crear_liquidacion(l: LiquidacionIn):
             cur.execute("""
                 INSERT INTO liquidaciones
                     (id_empleado, mes, anio, fecha, sueldo_basico_formal, sueldo_basico_real,
+                     horas_formal, horas_real,
                      feriados_trabajados, ausencias_justificadas, ausencias_no_justificadas,
                      total_bruto_formal, neto_formal, total_bruto_real, neto_real,
                      pago_efectivo, neto_total_a_pagar, saldo_pendiente)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (id_empleado, mes, anio) DO UPDATE SET
                     fecha=EXCLUDED.fecha, sueldo_basico_formal=EXCLUDED.sueldo_basico_formal,
                     sueldo_basico_real=EXCLUDED.sueldo_basico_real,
+                    horas_formal=EXCLUDED.horas_formal, horas_real=EXCLUDED.horas_real,
                     feriados_trabajados=EXCLUDED.feriados_trabajados,
                     ausencias_justificadas=EXCLUDED.ausencias_justificadas,
                     ausencias_no_justificadas=EXCLUDED.ausencias_no_justificadas,
@@ -2241,6 +2255,7 @@ def crear_liquidacion(l: LiquidacionIn):
                     saldo_pendiente = liquidaciones.saldo_pendiente + (EXCLUDED.neto_total_a_pagar - liquidaciones.neto_total_a_pagar)
                 RETURNING id
             """, (l.id_empleado, l.mes, l.anio, l.fecha, l.sueldo_basico_formal, l.sueldo_basico_real,
+                  l.horas_formal, l.horas_real,
                   l.feriados_trabajados, l.ausencias_justificadas, l.ausencias_no_justificadas,
                   calculo["total_bruto_formal"], calculo["neto_formal"], calculo["total_bruto_real"], calculo["neto_real"],
                   calculo["pago_efectivo"], calculo["neto_total_a_pagar"], calculo["neto_total_a_pagar"]))
