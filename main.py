@@ -1858,6 +1858,7 @@ class ConceptoLiquidacionIn(BaseModel):
     track: str           # 'FORMAL', 'REAL' o 'AMBOS'
     porcentaje: Optional[float] = None
     orden: Optional[int] = 0
+    activo: Optional[bool] = True
 
 @app.get("/conceptos_liquidacion")
 def get_conceptos_liquidacion(convenio: Optional[str] = None):
@@ -1882,9 +1883,9 @@ def crear_concepto_liquidacion(c: ConceptoLiquidacionIn):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO conceptos_liquidacion (convenio, nombre, tipo, calculo, track, porcentaje, orden)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-            """, (c.convenio, c.nombre, c.tipo, c.calculo, c.track, c.porcentaje, c.orden))
+                INSERT INTO conceptos_liquidacion (convenio, nombre, tipo, calculo, track, porcentaje, orden, activo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (c.convenio, c.nombre, c.tipo, c.calculo, c.track, c.porcentaje, c.orden, c.activo))
         conn.commit()
         return {"ok": True}
     finally:
@@ -1897,9 +1898,9 @@ def actualizar_concepto_liquidacion(id: int, c: ConceptoLiquidacionIn):
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE conceptos_liquidacion SET
-                    convenio=%s, nombre=%s, tipo=%s, calculo=%s, track=%s, porcentaje=%s, orden=%s
+                    convenio=%s, nombre=%s, tipo=%s, calculo=%s, track=%s, porcentaje=%s, orden=%s, activo=%s
                 WHERE id=%s
-            """, (c.convenio, c.nombre, c.tipo, c.calculo, c.track, c.porcentaje, c.orden, id))
+            """, (c.convenio, c.nombre, c.tipo, c.calculo, c.track, c.porcentaje, c.orden, c.activo, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -1997,7 +1998,7 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT * FROM conceptos_liquidacion
-                WHERE convenio = %s OR convenio = 'GENERAL'
+                WHERE (convenio = %s OR convenio = 'GENERAL') AND activo = true
                 ORDER BY orden, id
             """, (l.convenio,))
             conceptos = cur.fetchall()
