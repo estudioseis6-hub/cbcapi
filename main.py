@@ -1981,12 +1981,14 @@ def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_
         detalle.append({"id_concepto": c["id"], "nombre": c["nombre"], "tipo": c["tipo"], "track": track, "monto": monto})
         total_descuentos += monto
 
-    # Suma No Remunerativa: se suma al final, después de calcular Aportes sobre el bruto "gravado".
+    # Suma No Remunerativa: no forma parte del Bruto ni de la base de Aportes — se suma
+    # directo al Neto, como una línea aparte (al mismo nivel que iría un Adelanto).
+    extra_no_remunerativo = 0.0
     if track == "FORMAL" and suma_no_remunerativa:
         detalle.append({"id_concepto": None, "nombre": "Suma No Remunerativa", "tipo": "HABER", "track": track, "monto": round(suma_no_remunerativa, 2)})
-        bruto = round(bruto + suma_no_remunerativa, 2)
+        extra_no_remunerativo = suma_no_remunerativa
 
-    neto = round(bruto - total_descuentos, 2)
+    neto = round(bruto - total_descuentos + extra_no_remunerativo, 2)
     return detalle, bruto, neto
 
 class LiquidacionCalcularIn(BaseModel):
