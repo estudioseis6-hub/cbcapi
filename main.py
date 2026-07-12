@@ -1971,7 +1971,14 @@ def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_
             total_descuentos += monto
     bruto = round(sueldo_basico + total_haberes, 2)
     # Bruto "hipotético" de jornada completa, solo para la Obra Social (básico completo + los mismos adicionales)
-    bruto_obra_social = round((basico_jornada_completa if basico_jornada_completa is not None else sueldo_basico) + total_haberes, 2)
+    # Bruto "hipotético" de jornada completa, para Obra Social: se escala TODO el Bruto ya armado
+    # (básico + adicionales) por la proporción inversa de la jornada — no solo el básico.
+    # Así funciona igual para media jornada, un tercio, o cualquier fracción.
+    if basico_jornada_completa and sueldo_basico:
+        proporcion_jornada = sueldo_basico / basico_jornada_completa
+        bruto_obra_social = round(bruto / proporcion_jornada, 2) if proporcion_jornada else bruto
+    else:
+        bruto_obra_social = bruto
 
     # Conceptos sobre el Bruto (los Aportes) — cada uno con su propio %, todos visibles por separado.
     # Se calculan ANTES de sumar la Suma No Remunerativa, porque esa suma no forma parte de la base.
