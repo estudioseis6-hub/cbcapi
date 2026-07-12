@@ -1929,20 +1929,20 @@ def _get_config_num(cur, clave, default):
     row = cur.fetchone()
     return float(row["valor"]) if row else default
 
-def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, aportes_pct_total=0.0, es_caba=False):
+def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, es_caba=False):
     """Devuelve lista de detalle [(id_concepto, nombre, tipo, monto)] y el neto de ese track.
-    Los Aportes se calculan aparte, en una segunda pasada, porque van sobre el Bruto ya armado
-    (sueldo + adicionales), no sobre el básico solo."""
+    Los conceptos marcados 'AUTOMATICO_BRUTO' (los 3 Aportes) se calculan aparte, en una segunda
+    pasada, porque van sobre el Bruto ya armado (sueldo + adicionales), no sobre el básico solo."""
     detalle = []
     total_haberes = 0.0
     total_descuentos = 0.0
-    concepto_aportes = None
+    conceptos_sobre_bruto = []
     for c in conceptos:
         if c["track"] not in (track, "AMBOS"):
             continue
         nombre = c["nombre"]
-        if nombre == "Aportes":
-            concepto_aportes = c  # se procesa después, sobre el Bruto
+        if c["calculo"] == "AUTOMATICO_BRUTO":
+            conceptos_sobre_bruto.append(c)  # se procesan después, sobre el Bruto
             continue
         if c["calculo"] == "MANUAL":
             monto = float(manuales.get((track, c["id"]), 0) or 0)
@@ -1966,11 +1966,14 @@ def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_
             total_descuentos += monto
     bruto = round(sueldo_basico + total_haberes, 2)
 
-    # Aportes: sobre el Bruto ya armado, con el % legal configurado (Jubilación + Ley 19.032 + Obra Social)
-    if concepto_aportes is not None:
-        monto_aportes = round(bruto * aportes_pct_total, 2)
-        detalle.append({"id_concepto": concepto_aportes["id"], "nombre": "Aportes", "tipo": concepto_aportes["tipo"], "track": track, "monto": monto_aportes})
-        total_descuentos += monto_aportes
+    # Conceptos sobre el Bruto (los 3 Aportes) — cada uno con su propio %, todos visibles por separado
+    for c in conceptos_sobre_bruto:
+        monto = round(bruto * float(c["porcentaje"] or 0), 2)
+        detalle.append({"id_concepto": c["id"], "nombre": c["nombre"], "tipo": c["tipo"], "track": track, "monto": monto})
+        if c["tipo"] == "HABER":
+            total_haberes += monto
+        else:
+            total_descuentos += monto
 
     neto = round(bruto - total_descuentos, 2)
     return detalle, bruto, neto
@@ -2006,11 +2009,6 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
             conceptos = cur.fetchall()
             divisor_feriado = _get_config_num(cur, "divisor_feriado", 25)
             divisor_dia = _get_config_num(cur, "divisor_dia_normal", 30)
-            aportes_pct_total = (
-                _get_config_num(cur, "aporte_jubilacion_pct", 11) +
-                _get_config_num(cur, "aporte_ley19032_pct", 3) +
-                _get_config_num(cur, "aporte_obra_social_pct", 3)
-            ) / 100
             cur.execute("SELECT valor FROM configuracion WHERE clave = 'caba'")
             row_caba = cur.fetchone()
             es_caba = bool(row_caba and row_caba["valor"] == "SI")
@@ -2020,7 +2018,7 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
         detalle_formal, bruto_formal, neto_formal = _calcular_track(
             conceptos, "FORMAL", l.sueldo_basico_formal, l.feriados_trabajados,
             l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia,
-            aportes_pct_total, es_caba
+            es_caba
         )
 
         detalle_real, bruto_real, neto_real = None, None, None
@@ -2029,7 +2027,7 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
             detalle_real, bruto_real, neto_real = _calcular_track(
                 conceptos, "REAL", l.sueldo_basico_real, l.feriados_trabajados,
                 l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia,
-                aportes_pct_total, es_caba
+                es_caba
             )
             pago_efectivo = round(neto_real - neto_formal, 2)
 
