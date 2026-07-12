@@ -2597,6 +2597,21 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             """, (fecha_corte,))
             fondos = {r["cuenta_patrimonial"]: float(r["saldo_actual"]) for r in cur.fetchall()}
 
+            # Saldos "genéricos" (declarados a mano en Balance Inicial) para cualquier cuenta que
+            # NO sea un Fondo de tesorería — sirven tanto para Pasivo (deudas de apertura que no son
+            # facturas de un proveedor puntual) como para Activo (Bienes de Uso, Créditos Fiscales, etc.
+            # que tampoco son caja/banco). No tienen movimientos posteriores propios: el saldo declarado
+            # se mantiene igual mes a mes hasta que alguien lo edite de nuevo.
+            cur.execute("""
+                SELECT cuenta_patrimonial, COALESCE(SUM(importe), 0) AS total
+                FROM saldos_iniciales
+                WHERE fecha = %s AND cuenta_patrimonial NOT IN (
+                    SELECT cuenta_patrimonial FROM fondos WHERE cuenta_patrimonial IS NOT NULL
+                )
+                GROUP BY cuenta_patrimonial
+            """, (fecha_corte,))
+            saldos_genericos = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+
             # Pasivo inicio: facturas impagas con fecha <= fecha_corte
             cur.execute("""
                 SELECT t.cuenta_patrimonial, COALESCE(SUM(o.importe), 0) AS total
@@ -2607,6 +2622,10 @@ def get_balance_patrimonial(mes: Optional[int] = None):
                 GROUP BY t.cuenta_patrimonial
             """, (fecha_corte,))
             pasivo_cc_inicio = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+            # Sumamos los saldos genéricos de apertura (ej. Sueldos a Pagar declarado a mano) —
+            # así una deuda de apertura que no es factura de proveedor también cuenta.
+            for cuenta, importe in saldos_genericos.items():
+                pasivo_cc_inicio[cuenta] = pasivo_cc_inicio.get(cuenta, 0) + importe
 
             # Pasivo actual: facturas impagas con fecha > fecha_corte
             cur.execute("""
@@ -2653,6 +2672,7 @@ def get_balance_patrimonial(mes: Optional[int] = None):
 
         return {
             "fondos": fondos,
+            "saldos_genericos": saldos_genericos,
             "pasivo_cc_inicio": pasivo_cc_inicio,
             "pasivo_cc_actual": pasivo_cc_actual,
             "pasivo_cc": pasivo_cc_actual,
