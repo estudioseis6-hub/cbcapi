@@ -1929,10 +1929,12 @@ def _get_config_num(cur, clave, default):
     row = cur.fetchone()
     return float(row["valor"]) if row else default
 
-def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, es_caba=False):
+def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, es_caba=False, suma_no_remunerativa=0.0):
     """Devuelve lista de detalle [(id_concepto, nombre, tipo, monto)] y el neto de ese track.
     Los conceptos marcados 'AUTOMATICO_BRUTO' (los 3 Aportes) se calculan aparte, en una segunda
-    pasada, porque van sobre el Bruto ya armado (sueldo + adicionales), no sobre el básico solo."""
+    pasada, porque van sobre el Bruto ya armado (sueldo + adicionales), no sobre el básico solo.
+    La Suma No Remunerativa se suma DESPUÉS de los Aportes — no forma parte de la base sobre la
+    que se calculan, tal como corresponde legalmente."""
     detalle = []
     total_haberes = 0.0
     total_descuentos = 0.0
@@ -1966,14 +1968,17 @@ def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_
             total_descuentos += monto
     bruto = round(sueldo_basico + total_haberes, 2)
 
-    # Conceptos sobre el Bruto (los 3 Aportes) — cada uno con su propio %, todos visibles por separado
+    # Conceptos sobre el Bruto (los 3 Aportes) — cada uno con su propio %, todos visibles por separado.
+    # Se calculan ANTES de sumar la Suma No Remunerativa, porque esa suma no forma parte de la base.
     for c in conceptos_sobre_bruto:
         monto = round(bruto * float(c["porcentaje"] or 0), 2)
         detalle.append({"id_concepto": c["id"], "nombre": c["nombre"], "tipo": c["tipo"], "track": track, "monto": monto})
-        if c["tipo"] == "HABER":
-            total_haberes += monto
-        else:
-            total_descuentos += monto
+        total_descuentos += monto
+
+    # Suma No Remunerativa: se suma al final, después de calcular Aportes sobre el bruto "gravado".
+    if track == "FORMAL" and suma_no_remunerativa:
+        detalle.append({"id_concepto": None, "nombre": "Suma No Remunerativa", "tipo": "HABER", "track": track, "monto": round(suma_no_remunerativa, 2)})
+        bruto = round(bruto + suma_no_remunerativa, 2)
 
     neto = round(bruto - total_descuentos, 2)
     return detalle, bruto, neto
@@ -1984,10 +1989,12 @@ class LiquidacionCalcularIn(BaseModel):
     sueldo_basico_real: Optional[float] = None
     horas_formal: Optional[float] = 192
     horas_real: Optional[float] = 192
-    feriados_trabajados: int = 0
+    feriados_trabajados: int = 0  # feriados del circuito Real
+    feriados_trabajados_formal: int = 0  # feriados del circuito Formal — independiente del Real
     ausencias_justificadas: int = 0
     ausencias_no_justificadas: int = 0
     manuales: dict = {}   # { "FORMAL:3": 23000, "REAL:7": 100000 }
+    suma_no_remunerativa_formal: float = 0  # de la Escala Convenio, ya prorrateada por jornada — no cuenta para Aportes
 
 def _parse_manuales(manuales_in):
     out = {}
@@ -2016,9 +2023,9 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
         manuales = _parse_manuales(l.manuales)
 
         detalle_formal, bruto_formal, neto_formal = _calcular_track(
-            conceptos, "FORMAL", l.sueldo_basico_formal, l.feriados_trabajados,
+            conceptos, "FORMAL", l.sueldo_basico_formal, l.feriados_trabajados_formal,
             l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia,
-            es_caba
+            es_caba, l.suma_no_remunerativa_formal
         )
 
         detalle_real, bruto_real, neto_real = None, None, None
@@ -2126,12 +2133,13 @@ def get_basicos_anteriores(mes: int, anio: int):
 
                 # --- Referencia de Escala Formal (siempre se calcula, para poder avisar si el usuario se aparta) ---
                 escala_formal_ref = None
+                suma_no_remunerativa_ref = None
                 if e["id_puesto_formal_declarado"] and tenedores:
                     cur.execute("SELECT categoria_convenio FROM cat_puestos WHERE id = %s", (e["id_puesto_formal_declarado"],))
                     fp = cur.fetchone()
                     if fp and fp["categoria_convenio"] is not None:
                         cur.execute("""
-                            SELECT basico FROM escala_salarial
+                            SELECT basico, suma_no_remunerativa FROM escala_salarial
                             WHERE convenio = %s AND categoria_convenio = %s AND tenedores = %s
                               AND (anio < %s OR (anio = %s AND mes <= %s))
                             ORDER BY anio DESC, mes DESC LIMIT 1
@@ -2139,6 +2147,8 @@ def get_basicos_anteriores(mes: int, anio: int):
                         esc = cur.fetchone()
                         if esc:
                             escala_formal_ref = float(esc["basico"])
+                            if esc["suma_no_remunerativa"] is not None:
+                                suma_no_remunerativa_ref = float(esc["suma_no_remunerativa"])
 
                 # --- Básico FORMAL sugerido: 1° su propio historial, 2° lo declarado al alta, 3° la Escala ---
                 if no_corresponde_formal:
@@ -2198,6 +2208,7 @@ def get_basicos_anteriores(mes: int, anio: int):
                     "no_corresponde_real": bool(no_corresponde_real),
                     "horas_formal": horas_formal,
                     "horas_real": horas_real,
+                    "suma_no_remunerativa_formal": round(suma_no_remunerativa_ref * proporcion_formal, 2) if suma_no_remunerativa_ref is not None else 0,
                 })
             return out
     finally:
@@ -2242,15 +2253,16 @@ def crear_liquidacion(l: LiquidacionIn):
                 INSERT INTO liquidaciones
                     (id_empleado, mes, anio, fecha, sueldo_basico_formal, sueldo_basico_real,
                      horas_formal, horas_real,
-                     feriados_trabajados, ausencias_justificadas, ausencias_no_justificadas,
+                     feriados_trabajados, feriados_trabajados_formal, ausencias_justificadas, ausencias_no_justificadas,
                      total_bruto_formal, neto_formal, total_bruto_real, neto_real,
                      pago_efectivo, neto_total_a_pagar, saldo_pendiente)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (id_empleado, mes, anio) DO UPDATE SET
                     fecha=EXCLUDED.fecha, sueldo_basico_formal=EXCLUDED.sueldo_basico_formal,
                     sueldo_basico_real=EXCLUDED.sueldo_basico_real,
                     horas_formal=EXCLUDED.horas_formal, horas_real=EXCLUDED.horas_real,
                     feriados_trabajados=EXCLUDED.feriados_trabajados,
+                    feriados_trabajados_formal=EXCLUDED.feriados_trabajados_formal,
                     ausencias_justificadas=EXCLUDED.ausencias_justificadas,
                     ausencias_no_justificadas=EXCLUDED.ausencias_no_justificadas,
                     total_bruto_formal=EXCLUDED.total_bruto_formal, neto_formal=EXCLUDED.neto_formal,
@@ -2260,7 +2272,7 @@ def crear_liquidacion(l: LiquidacionIn):
                 RETURNING id
             """, (l.id_empleado, l.mes, l.anio, l.fecha, l.sueldo_basico_formal, l.sueldo_basico_real,
                   l.horas_formal, l.horas_real,
-                  l.feriados_trabajados, l.ausencias_justificadas, l.ausencias_no_justificadas,
+                  l.feriados_trabajados, l.feriados_trabajados_formal, l.ausencias_justificadas, l.ausencias_no_justificadas,
                   calculo["total_bruto_formal"], calculo["neto_formal"], calculo["total_bruto_real"], calculo["neto_real"],
                   calculo["pago_efectivo"], calculo["neto_total_a_pagar"], calculo["neto_total_a_pagar"]))
             id_liq = cur.fetchone()["id"]
