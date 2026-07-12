@@ -1929,10 +1929,13 @@ def _get_config_num(cur, clave, default):
     row = cur.fetchone()
     return float(row["valor"]) if row else default
 
-def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, es_caba=False, suma_no_remunerativa=0.0):
+def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_just, manuales, divisor_feriado, divisor_dia, es_caba=False, suma_no_remunerativa=0.0, basico_jornada_completa=None):
     """Devuelve lista de detalle [(id_concepto, nombre, tipo, monto)] y el neto de ese track.
-    Los conceptos marcados 'AUTOMATICO_BRUTO' (los 3 Aportes) se calculan aparte, en una segunda
+    Los conceptos marcados 'AUTOMATICO_BRUTO' (los Aportes) se calculan aparte, en una segunda
     pasada, porque van sobre el Bruto ya armado (sueldo + adicionales), no sobre el básico solo.
+    "Obra Social (Aportes)" es la excepción: por acuerdo paritario se paga completa sin importar
+    la jornada, así que se calcula sobre un Bruto "hipotético" armado con el básico de jornada
+    completa (no el prorrateado) + los mismos adicionales ya calculados.
     La Suma No Remunerativa se suma DESPUÉS de los Aportes — no forma parte de la base sobre la
     que se calculan, tal como corresponde legalmente."""
     detalle = []
@@ -1967,11 +1970,14 @@ def _calcular_track(conceptos, track, sueldo_basico, feriados, aus_just, aus_no_
         else:
             total_descuentos += monto
     bruto = round(sueldo_basico + total_haberes, 2)
+    # Bruto "hipotético" de jornada completa, solo para la Obra Social (básico completo + los mismos adicionales)
+    bruto_obra_social = round((basico_jornada_completa if basico_jornada_completa is not None else sueldo_basico) + total_haberes, 2)
 
-    # Conceptos sobre el Bruto (los 3 Aportes) — cada uno con su propio %, todos visibles por separado.
+    # Conceptos sobre el Bruto (los Aportes) — cada uno con su propio %, todos visibles por separado.
     # Se calculan ANTES de sumar la Suma No Remunerativa, porque esa suma no forma parte de la base.
     for c in conceptos_sobre_bruto:
-        monto = round(bruto * float(c["porcentaje"] or 0), 2)
+        base = bruto_obra_social if c["nombre"] == "Obra Social (Aportes)" else bruto
+        monto = round(base * float(c["porcentaje"] or 0), 2)
         detalle.append({"id_concepto": c["id"], "nombre": c["nombre"], "tipo": c["tipo"], "track": track, "monto": monto})
         total_descuentos += monto
 
@@ -1995,6 +2001,7 @@ class LiquidacionCalcularIn(BaseModel):
     ausencias_no_justificadas: int = 0
     manuales: dict = {}   # { "FORMAL:3": 23000, "REAL:7": 100000 }
     suma_no_remunerativa_formal: float = 0  # de la Escala Convenio, ya prorrateada por jornada — no cuenta para Aportes
+    basico_jornada_completa_formal: Optional[float] = None  # sin prorratear — la Obra Social de Aportes se calcula siempre sobre esto
 
 def _parse_manuales(manuales_in):
     out = {}
@@ -2025,7 +2032,7 @@ def calcular_liquidacion(l: LiquidacionCalcularIn):
         detalle_formal, bruto_formal, neto_formal = _calcular_track(
             conceptos, "FORMAL", l.sueldo_basico_formal, l.feriados_trabajados_formal,
             l.ausencias_justificadas, l.ausencias_no_justificadas, manuales, divisor_feriado, divisor_dia,
-            es_caba, l.suma_no_remunerativa_formal
+            es_caba, l.suma_no_remunerativa_formal, l.basico_jornada_completa_formal
         )
 
         detalle_real, bruto_real, neto_real = None, None, None
@@ -2098,9 +2105,9 @@ def get_basicos_anteriores(mes: int, anio: int):
             tenedores = int(row["valor"]) if row and row["valor"] else None
 
             cur.execute("""
-                SELECT id, nombre, convenio, sueldo_basico, sueldo_basico_formal_alta, id_puesto_formal_declarado, id_puesto_real_declarado,
+                SELECT id, nombre, apellido, convenio, sueldo_basico, sueldo_basico_formal_alta, id_puesto_formal_declarado, id_puesto_real_declarado,
                        fecha_ingreso_afip, fecha_ingreso_real, jornada_real, jornada_formal
-                FROM empleados WHERE activo = true ORDER BY nombre
+                FROM empleados WHERE activo = true ORDER BY apellido NULLS LAST, nombre
             """)
             empleados = cur.fetchall()
             from datetime import date as _date
@@ -2196,7 +2203,7 @@ def get_basicos_anteriores(mes: int, anio: int):
 
                 out.append({
                     "id_empleado": e["id"],
-                    "nombre": e["nombre"],
+                    "nombre": f"{e['apellido']}, {e['nombre']}" if e["apellido"] else e["nombre"],
                     "convenio": e["convenio"],
                     "sueldo_basico_formal": basico_formal,
                     "sueldo_basico_real": basico_real,
@@ -2209,6 +2216,7 @@ def get_basicos_anteriores(mes: int, anio: int):
                     "horas_formal": horas_formal,
                     "horas_real": horas_real,
                     "suma_no_remunerativa_formal": round(suma_no_remunerativa_ref * proporcion_formal, 2) if suma_no_remunerativa_ref is not None else 0,
+                    "suma_no_remunerativa_jornada_completa": suma_no_remunerativa_ref if suma_no_remunerativa_ref is not None else 0,
                 })
             return out
     finally:
