@@ -1321,7 +1321,7 @@ def guardar_escala_salarial(e: EscalaSalarialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (e.mes, e.anio))
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s AND es_borrador = false", (e.mes, e.anio))
             if cur.fetchone()["n"] > 0:
                 return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede modificar la escala de convenio de un mes ya liquidado."}
             cur.execute("""
@@ -1348,7 +1348,7 @@ def aplicar_aumento_formal(a: AumentoFormalIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (a.mes, a.anio))
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s AND es_borrador = false", (a.mes, a.anio))
             if cur.fetchone()["n"] > 0:
                 return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede aplicar un aumento sobre un mes ya liquidado."}
             cur.execute("""
@@ -1496,7 +1496,7 @@ def guardar_escala_salarial_real(e: EscalaSalarialRealIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (e.mes, e.anio))
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s AND es_borrador = false", (e.mes, e.anio))
             if cur.fetchone()["n"] > 0:
                 return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede modificar la escala salarial de un mes ya liquidado."}
             cur.execute("""
@@ -1515,7 +1515,7 @@ def get_mes_cerrado(mes: int, anio: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (mes, anio))
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s AND es_borrador = false", (mes, anio))
             return {"cerrado": cur.fetchone()["n"] > 0}
     finally:
         conn.close()
@@ -1533,7 +1533,7 @@ def aplicar_aumento_real(a: AumentoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s", (a.mes, a.anio))
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE mes = %s AND anio = %s AND es_borrador = false", (a.mes, a.anio))
             if cur.fetchone()["n"] > 0:
                 return {"ok": False, "error": "Ese mes ya tiene liquidaciones guardadas — no se puede aplicar un aumento sobre un mes ya liquidado."}
             if a.convenio:
@@ -1784,7 +1784,7 @@ def eliminar_empleado(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE id_empleado = %s", (id,))
+            cur.execute("SELECT COUNT(*) AS n FROM liquidaciones WHERE id_empleado = %s AND es_borrador = false", (id,))
             n_liq = cur.fetchone()["n"]
             cur.execute("SELECT COUNT(*) AS n FROM cashflow WHERE id_empleado = %s", (id,))
             n_cash = cur.fetchone()["n"]
@@ -2075,6 +2075,7 @@ class LiquidacionIn(LiquidacionCalcularIn):
     mes: int
     anio: int
     fecha: str
+    es_borrador: bool = True  # True = "Guardar Cambios" (sin consecuencias), False = "Liquidar" (cierra el mes)
 
 @app.get("/liquidaciones")
 def get_liquidaciones(mes: Optional[int] = None, anio: Optional[int] = None, id_empleado: Optional[int] = None):
@@ -2136,7 +2137,7 @@ def get_basicos_anteriores(mes: int, anio: int):
 
                 cur.execute("""
                     SELECT sueldo_basico_formal, sueldo_basico_real, horas_formal, horas_real FROM liquidaciones
-                    WHERE id_empleado = %s AND (anio < %s OR (anio = %s AND mes <= %s))
+                    WHERE id_empleado = %s AND es_borrador = false AND (anio < %s OR (anio = %s AND mes <= %s))
                     ORDER BY anio DESC, mes DESC LIMIT 1
                 """, (e["id"], anio_prev, anio_prev, mes_prev))
                 prev = cur.fetchone()
@@ -2270,8 +2271,8 @@ def crear_liquidacion(l: LiquidacionIn):
                      horas_formal, horas_real,
                      feriados_trabajados, feriados_trabajados_formal, ausencias_justificadas, ausencias_no_justificadas,
                      total_bruto_formal, neto_formal, total_bruto_real, neto_real,
-                     pago_efectivo, neto_total_a_pagar, saldo_pendiente)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     pago_efectivo, neto_total_a_pagar, saldo_pendiente, es_borrador)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (id_empleado, mes, anio) DO UPDATE SET
                     fecha=EXCLUDED.fecha, sueldo_basico_formal=EXCLUDED.sueldo_basico_formal,
                     sueldo_basico_real=EXCLUDED.sueldo_basico_real,
@@ -2283,13 +2284,14 @@ def crear_liquidacion(l: LiquidacionIn):
                     total_bruto_formal=EXCLUDED.total_bruto_formal, neto_formal=EXCLUDED.neto_formal,
                     total_bruto_real=EXCLUDED.total_bruto_real, neto_real=EXCLUDED.neto_real,
                     pago_efectivo=EXCLUDED.pago_efectivo, neto_total_a_pagar=EXCLUDED.neto_total_a_pagar,
-                    saldo_pendiente = liquidaciones.saldo_pendiente + (EXCLUDED.neto_total_a_pagar - liquidaciones.neto_total_a_pagar)
+                    saldo_pendiente = liquidaciones.saldo_pendiente + (EXCLUDED.neto_total_a_pagar - liquidaciones.neto_total_a_pagar),
+                    es_borrador = liquidaciones.es_borrador AND EXCLUDED.es_borrador
                 RETURNING id
             """, (l.id_empleado, l.mes, l.anio, l.fecha, l.sueldo_basico_formal, l.sueldo_basico_real,
                   l.horas_formal, l.horas_real,
                   l.feriados_trabajados, l.feriados_trabajados_formal, l.ausencias_justificadas, l.ausencias_no_justificadas,
                   calculo["total_bruto_formal"], calculo["neto_formal"], calculo["total_bruto_real"], calculo["neto_real"],
-                  calculo["pago_efectivo"], calculo["neto_total_a_pagar"], calculo["neto_total_a_pagar"]))
+                  calculo["pago_efectivo"], calculo["neto_total_a_pagar"], calculo["neto_total_a_pagar"], l.es_borrador))
             id_liq = cur.fetchone()["id"]
 
             cur.execute("DELETE FROM liquidacion_detalle WHERE id_liquidacion = %s", (id_liq,))
