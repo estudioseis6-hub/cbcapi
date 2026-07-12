@@ -2159,13 +2159,11 @@ def get_basicos_anteriores(mes: int, anio: int):
                             if esc["suma_no_remunerativa"] is not None:
                                 suma_no_remunerativa_ref = float(esc["suma_no_remunerativa"])
 
-                # --- Básico FORMAL sugerido: 1° su propio historial, 2° lo declarado al alta, 3° la Escala ---
+                # --- Básico FORMAL sugerido: 1° su propio historial, 2° la Escala Convenio del mes (ya trae su propio arrastre) ---
                 if no_corresponde_formal:
                     basico_formal = 0
                 elif prev and prev["sueldo_basico_formal"] is not None:
                     basico_formal = float(prev["sueldo_basico_formal"])
-                elif e["sueldo_basico_formal_alta"] is not None:
-                    basico_formal = round(float(e["sueldo_basico_formal_alta"]) * proporcion_formal, 2)
                 elif escala_formal_ref is not None:
                     basico_formal = round(escala_formal_ref * proporcion_formal, 2)
                 else:
@@ -2200,7 +2198,7 @@ def get_basicos_anteriores(mes: int, anio: int):
                 # La referencia de "jornada completa" prioriza lo declarado específicamente para
                 # este empleado (el campo del modal es el que manda) — la Escala es solo el respaldo
                 # si nunca se declaró nada puntual.
-                referencia_formal_jornada_completa = float(e["sueldo_basico_formal_alta"]) if e["sueldo_basico_formal_alta"] is not None else escala_formal_ref
+                referencia_formal_jornada_completa = escala_formal_ref
                 referencia_real_jornada_completa = float(e["sueldo_basico"]) if e["sueldo_basico"] is not None else escala_real_ref
 
                 out.append({
