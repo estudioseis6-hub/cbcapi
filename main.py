@@ -331,12 +331,13 @@ def crear_movimiento(m: MovimientoIn):
         with conn.cursor() as cur:
             fecha = date.fromisoformat(m.fecha)
             confirmado = fecha <= date.today()
+            id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", m.detalle)
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado))
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado, id_asiento))
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "id_asiento": id_asiento}
     finally:
         conn.close()
 
@@ -355,17 +356,27 @@ def crear_transferencia(t: TransferenciaIn):
             fecha = date.fromisoformat(t.fecha)
             confirmado = fecha <= date.today()
             id_transf = str(uuid.uuid4())
-            detalle = t.detalle or "Transferencia entre fondos"
+            # Nombres reales de los fondos, para que la descripción del asiento diga
+            # "Banco Santander → Efectivo Caja" en vez de un texto genérico.
+            cur.execute("SELECT id, nombre FROM fondos WHERE id IN (%s, %s)", (t.id_fondo_origen, t.id_fondo_destino))
+            nombres_fondo = {r["id"]: r["nombre"] for r in cur.fetchall()}
+            nombre_origen = nombres_fondo.get(t.id_fondo_origen, f"Fondo #{t.id_fondo_origen}")
+            nombre_destino = nombres_fondo.get(t.id_fondo_destino, f"Fondo #{t.id_fondo_destino}")
+            monto_fmt = f"{abs(t.importe):,.1f}"
+            detalle_base = t.detalle or f"Transferencia: {nombre_origen} → {nombre_destino} (${monto_fmt})"
+            detalle = detalle_base
+            # Un solo asiento para las dos patas — anular una, anula la otra junto con ella.
+            id_asiento = _crear_asiento(cur, "TRANSFERENCIA", detalle_base)
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (fecha.month, fecha, 717, "Transferencias", detalle, -abs(t.importe), t.id_fondo_origen, confirmado, id_transf))
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, 717, "Transferencias", detalle, -abs(t.importe), t.id_fondo_origen, confirmado, id_transf, id_asiento))
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (fecha.month, fecha, 716, "Transferencias", detalle, abs(t.importe), t.id_fondo_destino, confirmado, id_transf))
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, 716, "Transferencias", detalle, abs(t.importe), t.id_fondo_destino, confirmado, id_transf, id_asiento))
         conn.commit()
-        return {"ok": True, "id_transferencia": id_transf}
+        return {"ok": True, "id_transferencia": id_transf, "id_asiento": id_asiento}
     finally:
         conn.close()
 
@@ -2523,7 +2534,9 @@ def get_proyeccion_alerta():
             cur.execute("""
                 SELECT f.id, f.nombre, f.abrev, f.slot, f.moneda,
                        f.saldo_inicial +
-                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0)
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                                          AND (c.id_asiento IS NULL OR c.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+                                     THEN c.importe ELSE 0 END), 0)
                        AS saldo_actual
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
@@ -2587,29 +2600,36 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             cur.execute("""
                 SELECT f.cuenta_patrimonial,
                        COALESCE(si.importe, 0) +
-                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS saldo_actual
+                       COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                                          AND (c.id_asiento IS NULL OR c.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+                                     THEN c.importe ELSE 0 END), 0) AS saldo_actual
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 LEFT JOIN saldos_iniciales si ON si.cuenta_patrimonial = f.cuenta_patrimonial
                     AND si.fecha = %s
+                    AND (si.id_asiento IS NULL OR si.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
                 WHERE f.cuenta_patrimonial IS NOT NULL AND f.activo = true
                 GROUP BY f.cuenta_patrimonial, si.importe
             """, (fecha_corte,))
             fondos = {r["cuenta_patrimonial"]: float(r["saldo_actual"]) for r in cur.fetchall()}
 
-            # Saldos "genéricos" (declarados a mano en Balance Inicial) para cualquier cuenta que
-            # NO sea un Fondo de tesorería — sirven tanto para Pasivo (deudas de apertura que no son
-            # facturas de un proveedor puntual) como para Activo (Bienes de Uso, Créditos Fiscales, etc.
-            # que tampoco son caja/banco). No tienen movimientos posteriores propios: el saldo declarado
-            # se mantiene igual mes a mes hasta que alguien lo edite de nuevo.
+            # Saldos "genéricos" para cualquier cuenta que NO sea un Fondo de tesorería — sirven
+            # tanto para Pasivo (deudas de apertura que no son factura de un proveedor puntual,
+            # ej. Sueldos a Pagar) como para Activo (Bienes de Uso, Créditos Fiscales, etc.).
+            # Es un historial real: la carga original de apertura NUNCA se toca — cada pago o ajuste
+            # posterior es una fila NUEVA, con su propia fecha y su propio asiento (mismo mecanismo
+            # que ya usa Fondos con cashflow). El total es la suma de todo lo que tenga fecha hasta
+            # hoy, exactamente como ya funciona con Fondos.
             cur.execute("""
                 SELECT cuenta_patrimonial, COALESCE(SUM(importe), 0) AS total
                 FROM saldos_iniciales
-                WHERE fecha = %s AND cuenta_patrimonial NOT IN (
+                WHERE fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                AND cuenta_patrimonial NOT IN (
                     SELECT cuenta_patrimonial FROM fondos WHERE cuenta_patrimonial IS NOT NULL
                 )
+                AND (id_asiento IS NULL OR id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
                 GROUP BY cuenta_patrimonial
-            """, (fecha_corte,))
+            """)
             saldos_genericos = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
 
             # Pasivo inicio: facturas impagas con fecha <= fecha_corte
@@ -2682,6 +2702,80 @@ def get_balance_patrimonial(mes: Optional[int] = None):
             "tarjetas_pendientes": tarjetas,
             "fecha_corte": fecha_corte,
         }
+    finally:
+        conn.close()
+
+
+class AsientoIn(BaseModel):
+    tipo_origen: str
+    descripcion: Optional[str] = None
+
+class AnularAsientoIn(BaseModel):
+    motivo: Optional[str] = None
+
+def _crear_asiento(cur, tipo_origen, descripcion=None):
+    """Crea un asiento y devuelve su id. Se usa DESDE ADENTRO de otros endpoints
+    (saldos_iniciales, comprobantes, movimientos, liquidaciones) — no es para llamar solo,
+    siempre como parte de la misma transacción de lo que genera."""
+    cur.execute(
+        "INSERT INTO asientos (tipo_origen, descripcion) VALUES (%s, %s) RETURNING id",
+        (tipo_origen, descripcion)
+    )
+    return cur.fetchone()["id"]
+
+@app.post("/asientos")
+def crear_asiento(a: AsientoIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            id_nuevo = _crear_asiento(cur, a.tipo_origen, a.descripcion)
+        conn.commit()
+        return {"ok": True, "id": id_nuevo}
+    finally:
+        conn.close()
+
+@app.get("/asientos")
+def get_asientos(tipo_origen: Optional[str] = None, incluir_anulados: bool = True):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if tipo_origen:
+                where = "WHERE tipo_origen = %s" + ("" if incluir_anulados else " AND anulado = false")
+                cur.execute(f"SELECT * FROM asientos {where} ORDER BY fecha_creacion DESC", (tipo_origen,))
+            else:
+                where = "" if incluir_anulados else "WHERE anulado = false"
+                cur.execute(f"SELECT * FROM asientos {where} ORDER BY fecha_creacion DESC")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.put("/asientos/{id}/anular")
+def anular_asiento(id: int, a: AnularAsientoIn):
+    """Anula un asiento. No borra ninguna fila de las tablas que dependen de él — las queries de
+    Balance ya filtran por 'asiento no anulado', así que esto alcanza para que deje de contar."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE asientos SET anulado = true,
+                    fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                    motivo_anulacion = %s
+                WHERE id = %s
+            """, (a.motivo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/asientos/{id}/reactivar")
+def reactivar_asiento(id: int):
+    """Por si se anuló por error — vuelve a contar como si nunca se hubiera anulado."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE asientos SET anulado = false, fecha_anulacion = NULL, motivo_anulacion = NULL WHERE id = %s", (id,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -2844,14 +2938,15 @@ def actualizar_configuracion(clave: str, body: dict):
         conn.close()
 
 @app.get("/saldos_iniciales")
-def get_saldos_iniciales(fecha: Optional[str] = None):
+def get_saldos_iniciales(fecha: Optional[str] = None, incluir_anulados: bool = False):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            filtro_anulados = "" if incluir_anulados else "AND (id_asiento IS NULL OR id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))"
             if fecha:
-                cur.execute("SELECT * FROM saldos_iniciales WHERE fecha = %s ORDER BY cuenta_patrimonial", (fecha,))
+                cur.execute(f"SELECT * FROM saldos_iniciales WHERE fecha = %s {filtro_anulados} ORDER BY cuenta_patrimonial", (fecha,))
             else:
-                cur.execute("SELECT * FROM saldos_iniciales ORDER BY fecha, cuenta_patrimonial")
+                cur.execute(f"SELECT * FROM saldos_iniciales WHERE true {filtro_anulados} ORDER BY fecha, cuenta_patrimonial")
             return cur.fetchall()
     finally:
         conn.close()
@@ -2861,13 +2956,14 @@ def crear_saldo_inicial(s: SaldoInicialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}")
             cur.execute("""
-                INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion)
-                VALUES (%s, %s, %s, %s) RETURNING id
-            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion))
+                INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion, id_asiento)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento))
             id_nuevo = cur.fetchone()["id"]
         conn.commit()
-        return {"ok": True, "id": id_nuevo}
+        return {"ok": True, "id": id_nuevo, "id_asiento": id_asiento}
     finally:
         conn.close()
 
@@ -2876,10 +2972,16 @@ def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Si esta fila todavía no tenía asiento (cargada antes de este cambio), le creamos uno recién ahora.
+            cur.execute("SELECT id_asiento FROM saldos_iniciales WHERE id = %s", (id,))
+            existente = cur.fetchone()
+            id_asiento = existente["id_asiento"] if existente else None
+            if id_asiento is None:
+                id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}")
             cur.execute("""
-                UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s
+                UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s, id_asiento=%s
                 WHERE id=%s
-            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id))
+            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -2887,10 +2989,22 @@ def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
 
 @app.delete("/saldos_iniciales/{id}")
 def eliminar_saldo_inicial(id: int):
+    """No borra la fila si tiene un asiento — anula el asiento en su lugar, para dejar rastro
+    de que existió y se dio de baja, en vez de que desaparezca sin dejar huella."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM saldos_iniciales WHERE id=%s", (id,))
+            cur.execute("SELECT id_asiento FROM saldos_iniciales WHERE id = %s", (id,))
+            row = cur.fetchone()
+            if row and row["id_asiento"]:
+                cur.execute("""
+                    UPDATE asientos SET anulado = true,
+                        fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                        motivo_anulacion = 'Eliminado desde Balance Inicial'
+                    WHERE id = %s
+                """, (row["id_asiento"],))
+            else:
+                cur.execute("DELETE FROM saldos_iniciales WHERE id=%s", (id,))
         conn.commit()
         return {"ok": True}
     finally:
