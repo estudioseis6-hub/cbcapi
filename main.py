@@ -2763,6 +2763,32 @@ def crear_asiento(a: AsientoIn):
     finally:
         conn.close()
 
+@app.get("/asientos_con_lineas")
+def get_asientos_con_lineas(tipo_origen: Optional[str] = None, incluir_anulados: bool = True):
+    """Igual que /asientos, pero cada uno ya trae sus líneas adentro — para no tener que
+    pedirlas una por una desde el frontend."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if tipo_origen:
+                where = "WHERE tipo_origen = %s" + ("" if incluir_anulados else " AND anulado = false")
+                cur.execute(f"SELECT * FROM asientos {where} ORDER BY fecha_creacion DESC", (tipo_origen,))
+            else:
+                where = "" if incluir_anulados else "WHERE anulado = false"
+                cur.execute(f"SELECT * FROM asientos {where} ORDER BY fecha_creacion DESC")
+            asientos = cur.fetchall()
+            ids = [a["id"] for a in asientos]
+            lineas_por_asiento = {}
+            if ids:
+                cur.execute("SELECT * FROM asiento_lineas WHERE id_asiento = ANY(%s) ORDER BY id", (ids,))
+                for l in cur.fetchall():
+                    lineas_por_asiento.setdefault(l["id_asiento"], []).append(l)
+            for a in asientos:
+                a["lineas"] = lineas_por_asiento.get(a["id"], [])
+            return asientos
+    finally:
+        conn.close()
+
 @app.get("/asientos")
 def get_asientos(tipo_origen: Optional[str] = None, incluir_anulados: bool = True):
     conn = get_conn()
