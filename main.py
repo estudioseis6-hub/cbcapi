@@ -332,6 +332,17 @@ def crear_movimiento(m: MovimientoIn):
             fecha = date.fromisoformat(m.fecha)
             confirmado = fecha <= date.today()
             id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", m.detalle)
+            # Líneas reales del asiento: si es un egreso, el Fondo se acredita (sale plata) y la
+            # cuenta de gasto se debita. Si es un ingreso, al revés.
+            cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (m.id_fondo,))
+            fila_fondo = cur.fetchone()
+            cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{m.id_fondo}")
+            monto = abs(m.importe)
+            if m.importe < 0:
+                lineas = [(m.cod_cuenta, monto, 0, m.detalle), (cuenta_fondo, 0, monto, m.detalle)]
+            else:
+                lineas = [(cuenta_fondo, monto, 0, m.detalle), (m.cod_cuenta, 0, monto, m.detalle)]
+            _agregar_lineas_asiento(cur, id_asiento, lineas)
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -358,15 +369,22 @@ def crear_transferencia(t: TransferenciaIn):
             id_transf = str(uuid.uuid4())
             # Nombres reales de los fondos, para que la descripción del asiento diga
             # "Banco Santander → Efectivo Caja" en vez de un texto genérico.
-            cur.execute("SELECT id, nombre FROM fondos WHERE id IN (%s, %s)", (t.id_fondo_origen, t.id_fondo_destino))
-            nombres_fondo = {r["id"]: r["nombre"] for r in cur.fetchall()}
-            nombre_origen = nombres_fondo.get(t.id_fondo_origen, f"Fondo #{t.id_fondo_origen}")
-            nombre_destino = nombres_fondo.get(t.id_fondo_destino, f"Fondo #{t.id_fondo_destino}")
+            cur.execute("SELECT id, nombre, cuenta_patrimonial FROM fondos WHERE id IN (%s, %s)", (t.id_fondo_origen, t.id_fondo_destino))
+            filas_fondo = {r["id"]: r for r in cur.fetchall()}
+            nombre_origen = filas_fondo.get(t.id_fondo_origen, {}).get("nombre", f"Fondo #{t.id_fondo_origen}")
+            nombre_destino = filas_fondo.get(t.id_fondo_destino, {}).get("nombre", f"Fondo #{t.id_fondo_destino}")
+            cuenta_origen = filas_fondo.get(t.id_fondo_origen, {}).get("cuenta_patrimonial") or nombre_origen
+            cuenta_destino = filas_fondo.get(t.id_fondo_destino, {}).get("cuenta_patrimonial") or nombre_destino
             monto_fmt = f"{abs(t.importe):,.1f}"
             detalle_base = t.detalle or f"Transferencia: {nombre_origen} → {nombre_destino} (${monto_fmt})"
             detalle = detalle_base
             # Un solo asiento para las dos patas — anular una, anula la otra junto con ella.
             id_asiento = _crear_asiento(cur, "TRANSFERENCIA", detalle_base)
+            # Líneas reales del asiento: entra plata al destino (debe), sale del origen (haber).
+            _agregar_lineas_asiento(cur, id_asiento, [
+                (cuenta_destino, abs(t.importe), 0, f"Ingresa a {nombre_destino}"),
+                (cuenta_origen, 0, abs(t.importe), f"Sale de {nombre_origen}"),
+            ])
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -2723,6 +2741,17 @@ def _crear_asiento(cur, tipo_origen, descripcion=None):
     )
     return cur.fetchone()["id"]
 
+def _agregar_lineas_asiento(cur, id_asiento, lineas):
+    """lineas: lista de tuplas (cuenta_patrimonial, debe, haber, descripcion_opcional).
+    Todo asiento tiene que quedar balanceado: suma de debe == suma de haber."""
+    for linea in lineas:
+        cuenta, debe, haber = linea[0], linea[1], linea[2]
+        desc = linea[3] if len(linea) > 3 else None
+        cur.execute(
+            "INSERT INTO asiento_lineas (id_asiento, cuenta_patrimonial, debe, haber, descripcion) VALUES (%s, %s, %s, %s, %s)",
+            (id_asiento, cuenta, debe, haber, desc)
+        )
+
 @app.post("/asientos")
 def crear_asiento(a: AsientoIn):
     conn = get_conn()
@@ -2745,6 +2774,16 @@ def get_asientos(tipo_origen: Optional[str] = None, incluir_anulados: bool = Tru
             else:
                 where = "" if incluir_anulados else "WHERE anulado = false"
                 cur.execute(f"SELECT * FROM asientos {where} ORDER BY fecha_creacion DESC")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/asientos/{id}/lineas")
+def get_lineas_asiento(id: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM asiento_lineas WHERE id_asiento = %s ORDER BY id", (id,))
             return cur.fetchall()
     finally:
         conn.close()
