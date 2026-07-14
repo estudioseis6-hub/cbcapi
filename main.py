@@ -331,7 +331,7 @@ def crear_movimiento(m: MovimientoIn):
         with conn.cursor() as cur:
             fecha = date.fromisoformat(m.fecha)
             confirmado = fecha <= date.today()
-            id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", m.detalle)
+            id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", m.detalle, fecha)
             # Líneas reales del asiento: si es un egreso, el Fondo se acredita (sale plata) y la
             # cuenta de gasto se debita. Si es un ingreso, al revés.
             cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (m.id_fondo,))
@@ -379,7 +379,7 @@ def crear_transferencia(t: TransferenciaIn):
             detalle_base = t.detalle or f"Transferencia: {nombre_origen} → {nombre_destino} (${monto_fmt})"
             detalle = detalle_base
             # Un solo asiento para las dos patas — anular una, anula la otra junto con ella.
-            id_asiento = _crear_asiento(cur, "TRANSFERENCIA", detalle_base)
+            id_asiento = _crear_asiento(cur, "TRANSFERENCIA", detalle_base, fecha)
             # Líneas reales del asiento: entra plata al destino (debe), sale del origen (haber).
             _agregar_lineas_asiento(cur, id_asiento, [
                 (cuenta_destino, abs(t.importe), 0, f"Ingresa a {nombre_destino}"),
@@ -558,7 +558,7 @@ def crear_comprobante(c: ComprobanteIn):
             if cuenta_pasivo and importe:
                 lineas_asiento.append((cuenta_pasivo, 0, importe, c.descripcion))
 
-            id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}")
+            id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}", fecha_compra)
             if lineas_asiento:
                 _agregar_lineas_asiento(cur, id_asiento, lineas_asiento)
 
@@ -2784,13 +2784,15 @@ class AsientoIn(BaseModel):
 class AnularAsientoIn(BaseModel):
     motivo: Optional[str] = None
 
-def _crear_asiento(cur, tipo_origen, descripcion=None):
+def _crear_asiento(cur, tipo_origen, descripcion=None, fecha=None):
     """Crea un asiento y devuelve su id. Se usa DESDE ADENTRO de otros endpoints
     (saldos_iniciales, comprobantes, movimientos, liquidaciones) — no es para llamar solo,
-    siempre como parte de la misma transacción de lo que genera."""
+    siempre como parte de la misma transacción de lo que genera.
+    'fecha' es la fecha REAL de la operación (la de la factura, la del movimiento) — si no se
+    pasa, se usa hoy como mejor aproximación."""
     cur.execute(
-        "INSERT INTO asientos (tipo_origen, descripcion) VALUES (%s, %s) RETURNING id",
-        (tipo_origen, descripcion)
+        "INSERT INTO asientos (tipo_origen, descripcion, fecha) VALUES (%s, %s, %s) RETURNING id",
+        (tipo_origen, descripcion, fecha or date.today())
     )
     return cur.fetchone()["id"]
 
@@ -2864,6 +2866,65 @@ def get_lineas_asiento(id: int):
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM asiento_lineas WHERE id_asiento = %s ORDER BY id", (id,))
             return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/balance_unificado")
+def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None):
+    """Reemplaza /balance y /balance_patrimonial — una sola fuente de verdad (asiento_lineas)
+    para TODO el Balance (Resultados y Patrimonial), sin mezclar cashflow/operaciones/fondos
+    por separado. Cada cuenta del Plan de Cuentas trae:
+      - 'periodo': el movimiento SOLO del mes elegido (lo que importa para Resultados).
+      - 'acumulado': el saldo de siempre hasta el fin de ese mes (lo que importa para Patrimonial).
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            hoy = date.today()
+            anio = anio or hoy.year
+            if mes:
+                fecha_inicio_periodo = date(anio, mes, 1)
+                fecha_fin_periodo = date(anio + 1, 1, 1) - timedelta(days=1) if mes == 12 else date(anio, mes + 1, 1) - timedelta(days=1)
+            else:
+                fecha_inicio_periodo = date(anio, 1, 1)
+                fecha_fin_periodo = hoy
+
+            cur.execute("""
+                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc, nombre
+                FROM plan_de_cuentas WHERE activo = true
+                ORDER BY niv1, niv2, niv3, niv4, niv5
+            """)
+            cuentas = cur.fetchall()
+
+            # Movimiento del período (para Resultados): solo asientos con fecha DENTRO del mes elegido.
+            cur.execute("""
+                SELECT al.cuenta_patrimonial, COALESCE(SUM(al.debe - al.haber), 0) AS total
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                WHERE a.anulado = false AND a.fecha BETWEEN %s AND %s
+                GROUP BY al.cuenta_patrimonial
+            """, (fecha_inicio_periodo, fecha_fin_periodo))
+            movimiento_periodo = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+
+            # Saldo acumulado (para Patrimonial): todo lo que tenga fecha <= fin del mes elegido.
+            cur.execute("""
+                SELECT al.cuenta_patrimonial, COALESCE(SUM(al.debe - al.haber), 0) AS total
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                WHERE a.anulado = false AND a.fecha <= %s
+                GROUP BY al.cuenta_patrimonial
+            """, (fecha_fin_periodo,))
+            saldo_acumulado = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+
+            resultado = []
+            for c in cuentas:
+                nombre = c["nombre"]
+                resultado.append({
+                    **c,
+                    "periodo": movimiento_periodo.get(nombre, 0),
+                    "acumulado": saldo_acumulado.get(nombre, 0),
+                })
+            return resultado
     finally:
         conn.close()
 
@@ -3074,7 +3135,7 @@ def crear_saldo_inicial(s: SaldoInicialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}")
+            id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
             cur.execute("""
                 INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion, id_asiento)
                 VALUES (%s, %s, %s, %s, %s) RETURNING id
@@ -3095,7 +3156,7 @@ def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
             existente = cur.fetchone()
             id_asiento = existente["id_asiento"] if existente else None
             if id_asiento is None:
-                id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}")
+                id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
             cur.execute("""
                 UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s, id_asiento=%s
                 WHERE id=%s
