@@ -3130,12 +3130,31 @@ def get_saldos_iniciales(fecha: Optional[str] = None, incluir_anulados: bool = F
     finally:
         conn.close()
 
+def _lineas_apertura(cur, cuenta_patrimonial, importe):
+    """Arma las 2 líneas de un asiento de apertura: la cuenta en sí, y la contrapartida
+    contra 'Saldo Patrimonial de Apertura' — Activo al Debe, Pasivo al Haber."""
+    cur.execute("SELECT niv2_desc FROM plan_de_cuentas WHERE nombre = %s LIMIT 1", (cuenta_patrimonial,))
+    fila = cur.fetchone()
+    lado = fila["niv2_desc"] if fila else None
+    monto = abs(importe)
+    if lado == "Pasivo":
+        return [
+            (cuenta_patrimonial, 0, monto, "Apertura"),
+            ("Saldo Patrimonial de Apertura", monto, 0, "Apertura"),
+        ]
+    else:
+        return [
+            (cuenta_patrimonial, monto, 0, "Apertura"),
+            ("Saldo Patrimonial de Apertura", 0, monto, "Apertura"),
+        ]
+
 @app.post("/saldos_iniciales")
 def crear_saldo_inicial(s: SaldoInicialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
+            id_asiento = _crear_asiento(cur, "APERTURA", f"Apertura: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
+            _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
             cur.execute("""
                 INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion, id_asiento)
                 VALUES (%s, %s, %s, %s, %s) RETURNING id
@@ -3151,12 +3170,15 @@ def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Si esta fila todavía no tenía asiento (cargada antes de este cambio), le creamos uno recién ahora.
             cur.execute("SELECT id_asiento FROM saldos_iniciales WHERE id = %s", (id,))
             existente = cur.fetchone()
             id_asiento = existente["id_asiento"] if existente else None
             if id_asiento is None:
-                id_asiento = _crear_asiento(cur, "SALDO_INICIAL", f"Saldo inicial: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
+                id_asiento = _crear_asiento(cur, "APERTURA", f"Apertura: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
+            else:
+                # Ya tenía asiento — se reemplazan sus líneas por las nuevas, en vez de duplicar.
+                cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = %s", (id_asiento,))
+            _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
             cur.execute("""
                 UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s, id_asiento=%s
                 WHERE id=%s
