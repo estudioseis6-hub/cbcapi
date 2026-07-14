@@ -533,14 +533,43 @@ def crear_comprobante(c: ComprobanteIn):
                 + (c.perc_iva or 0) + (c.perc_iibb or 0) + (c.perc_otras or 0)
                 + (c.sin_factura or 0)
             )
+
+            # Buscamos las cuentas del Titular: cuenta_patrimonial (el Pasivo, va al Haber)
+            # y nivel4 (la cuenta de Gasto/Resultado, va al Debe) — nada de esto se tipea a mano
+            # en el formulario, ya está configurado una sola vez en Titulares.
+            cur.execute("SELECT cuenta_patrimonial, nivel4 FROM titulares WHERE id = %s", (str(c.id_titular),))
+            row_titular = cur.fetchone() or {}
+            cuenta_pasivo = row_titular.get("cuenta_patrimonial")
+            cuenta_gasto = row_titular.get("nivel4")
+
+            lineas_asiento = []
+            monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
+            if cuenta_gasto and monto_gasto:
+                lineas_asiento.append((cuenta_gasto, monto_gasto, 0, c.descripcion))
+            monto_iva = (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
+            if monto_iva:
+                lineas_asiento.append(("IVA Crédito Fiscal", monto_iva, 0, c.descripcion))
+            if c.perc_iva:
+                lineas_asiento.append(("Percepción IVA a Cuenta", c.perc_iva, 0, c.descripcion))
+            if c.perc_iibb:
+                lineas_asiento.append(("Percepción IIBB a Cuenta", c.perc_iibb, 0, c.descripcion))
+            if c.perc_otras:
+                lineas_asiento.append(("Otras Percepciones a Cuenta", c.perc_otras, 0, c.descripcion))
+            if cuenta_pasivo and importe:
+                lineas_asiento.append((cuenta_pasivo, 0, importe, c.descripcion))
+
+            id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}")
+            if lineas_asiento:
+                _agregar_lineas_asiento(cur, id_asiento, lineas_asiento)
+
             cur.execute("""
                 INSERT INTO operaciones
                     (fecha, fecha_compra, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes,
-                     subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura, es_informal)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura, es_informal, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
-                  c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal))
+                  c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal, id_asiento))
             id_operacion = cur.fetchone()["id"]
             id_fondo = c.id_fondo
             if id_fondo:
@@ -2649,6 +2678,30 @@ def get_balance_patrimonial(mes: Optional[int] = None):
                 GROUP BY cuenta_patrimonial
             """)
             saldos_genericos = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+
+            # Cualquier movimiento registrado en asientos (ej. IVA Crédito Fiscal y Percepciones de
+            # una factura de compra) también cuenta para el saldo genérico de esa cuenta —
+            # así una cuenta nueva, agregada en Admin, ya empieza a mostrar su saldo apenas tenga
+            # su primer asiento, sin que haga falta ningún otro cambio.
+            cur.execute("""
+                SELECT al.cuenta_patrimonial, COALESCE(SUM(al.debe - al.haber), 0) AS total
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                WHERE a.anulado = false
+                AND al.cuenta_patrimonial NOT IN (
+                    SELECT cuenta_patrimonial FROM fondos WHERE cuenta_patrimonial IS NOT NULL
+                )
+                AND al.cuenta_patrimonial NOT IN (
+                    SELECT cuenta_patrimonial FROM titulares WHERE cuenta_patrimonial IS NOT NULL
+                )
+                AND al.cuenta_patrimonial IN (
+                    SELECT nombre FROM plan_de_cuentas WHERE niv1_desc = 'Patrimonial'
+                )
+                GROUP BY al.cuenta_patrimonial
+            """)
+            for r in cur.fetchall():
+                cuenta = r["cuenta_patrimonial"]
+                saldos_genericos[cuenta] = saldos_genericos.get(cuenta, 0) + float(r["total"])
 
             # Pasivo inicio: facturas impagas con fecha <= fecha_corte
             cur.execute("""
