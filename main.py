@@ -2890,9 +2890,9 @@ def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None)
                 fecha_fin_periodo = hoy
 
             cur.execute("""
-                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc, nombre
+                SELECT id, niv1, niv2, niv3, niv4, niv5, niv6, niv1_desc, niv2_desc, niv3_desc, niv4_desc, niv6_desc, nombre, id_codigo
                 FROM plan_de_cuentas WHERE activo = true
-                ORDER BY niv1, niv2, niv3, niv4, niv5
+                ORDER BY niv1, niv2, niv3, niv4, niv5, niv6
             """)
             cuentas = cur.fetchall()
 
