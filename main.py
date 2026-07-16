@@ -835,7 +835,7 @@ def eliminar_operacion(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id_pago FROM operaciones WHERE id = %s", (id,))
+            cur.execute("SELECT id_pago, id_asiento FROM operaciones WHERE id = %s", (id,))
             row = cur.fetchone()
             if not row:
                 return {"ok": False, "error": "Operación no encontrada"}
@@ -843,6 +843,16 @@ def eliminar_operacion(id: int):
                 return {"ok": False, "error_paga": True}
             cur.execute("DELETE FROM cashflow WHERE id_operacion = %s AND confirmado = false", (id,))
             cur.execute("DELETE FROM operaciones WHERE id = %s", (id,))
+            # El paso que faltaba: si esta factura tenía un asiento (Gasto, IVA Crédito Fiscal,
+            # Percepciones, deuda al Proveedor), hay que anularlo — sino Balance lo sigue contando
+            # aunque la factura ya no exista en ningún otro lado.
+            if row["id_asiento"] is not None:
+                cur.execute("""
+                    UPDATE asientos SET anulado = true,
+                        fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                        motivo_anulacion = 'Factura eliminada desde Cuenta Corriente'
+                    WHERE id = %s
+                """, (row["id_asiento"],))
         conn.commit()
         return {"ok": True}
     finally:
@@ -2422,15 +2432,25 @@ def eliminar_cashflow(id: int):
             cur.execute("SELECT id FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
             if cur.fetchone():
                 return {"ok": False, "error": "Los ECheqs no se pueden eliminar."}
-            cur.execute("SELECT id_transferencia FROM cashflow WHERE id = %s", (id,))
+            cur.execute("SELECT id_transferencia, id_asiento FROM cashflow WHERE id = %s", (id,))
             row = cur.fetchone()
             id_transf = row["id_transferencia"] if row else None
+            id_asiento = row["id_asiento"] if row else None
             if id_transf:
                 cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_transferencia = %s)", (id_transf,))
                 cur.execute("DELETE FROM cashflow WHERE id_transferencia = %s", (id_transf,))
             else:
                 cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
                 cur.execute("DELETE FROM cashflow WHERE id = %s", (id,))
+            # El paso que faltaba: anular el asiento vinculado (mismo para las dos patas de una
+            # transferencia, ya que comparten un solo id_asiento) — sino Balance lo sigue contando.
+            if id_asiento is not None:
+                cur.execute("""
+                    UPDATE asientos SET anulado = true,
+                        fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                        motivo_anulacion = 'Movimiento eliminado desde Tesorería'
+                    WHERE id = %s
+                """, (id_asiento,))
         conn.commit()
         return {"ok": True}
     finally:
@@ -2941,6 +2961,32 @@ def anular_asiento(id: int, a: AnularAsientoIn):
                     motivo_anulacion = %s
                 WHERE id = %s
             """, (a.motivo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/asientos/{id}/revertir_todo")
+def revertir_todo_asiento(id: int, a: AnularAsientoIn):
+    """Uso restringido (Emi/Tomy) — a diferencia de 'anular' (que solo marca el asiento), esto
+    ANULA el asiento Y borra de verdad cualquier fila en operaciones/cashflow/saldos_iniciales
+    que tenga este mismo id_asiento — sin importar las reglas propias de cada pantalla (ej. no
+    chequea si una factura ya está pagada). Pensado para corregir un error de carga de punta a
+    punta, desde el Libro Diario, sin tener que ir pantalla por pantalla."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Rompemos las referencias cruzadas antes de borrar, para no chocar contra las FK.
+            cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_asiento = %s)", (id,))
+            cur.execute("DELETE FROM cashflow WHERE id_asiento = %s", (id,))
+            cur.execute("DELETE FROM operaciones WHERE id_asiento = %s", (id,))
+            cur.execute("DELETE FROM saldos_iniciales WHERE id_asiento = %s", (id,))
+            cur.execute("""
+                UPDATE asientos SET anulado = true,
+                    fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                    motivo_anulacion = %s
+                WHERE id = %s
+            """, (a.motivo or "Revertido por completo desde Libro Diario", id))
         conn.commit()
         return {"ok": True}
     finally:
