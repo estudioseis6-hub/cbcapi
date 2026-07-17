@@ -290,11 +290,26 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
             cur.execute("UPDATE cashflow SET confirmado=true, fecha=%s, mes=%s WHERE id=%s",
                         (fecha, fecha.month, id))
             cur.execute("UPDATE cheques_emitidos SET estado='DEBITADO' WHERE id_cashflow=%s", (id,))
-            # Si es un cheque de apertura, marcarlo como debitado
-            cur.execute("SELECT id_cheque_apertura FROM cashflow WHERE id=%s", (id,))
+            # Si es un cheque de apertura, marcarlo como debitado y generar el asiento que
+            # cancela el Pasivo pendiente y baja el Fondo real — mismo criterio que si se
+            # marcara Debitado directo desde la solapa de Cheques de Apertura en Balance.
+            cur.execute("SELECT id_cheque_apertura, id_fondo FROM cashflow WHERE id=%s", (id,))
             row = cur.fetchone()
             if row and row["id_cheque_apertura"]:
+                cur.execute("SELECT debitado, numero, importe, id_asiento_debito FROM cheques_apertura WHERE id = %s", (row["id_cheque_apertura"],))
+                cheque = cur.fetchone()
                 cur.execute("UPDATE cheques_apertura SET debitado=true WHERE id=%s", (row["id_cheque_apertura"],))
+                if cheque and not cheque["debitado"] and not cheque["id_asiento_debito"] and row["id_fondo"]:
+                    cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (row["id_fondo"],))
+                    fila_fondo = cur.fetchone()
+                    cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else None)
+                    if cuenta_fondo:
+                        nuevo_asiento = _crear_asiento(cur, "CHEQUE_APERTURA_DEBITO", f"Débito de cheque apertura #{cheque['numero'] or ''}", fecha)
+                        _agregar_lineas_asiento(cur, nuevo_asiento, [
+                            ("Valores Emitidos — Cheques Pendientes", cheque["importe"], 0, "Débito de cheque"),
+                            (cuenta_fondo, 0, cheque["importe"], "Débito de cheque"),
+                        ])
+                        cur.execute("UPDATE cheques_apertura SET id_asiento_debito = %s WHERE id = %s", (nuevo_asiento, row["id_cheque_apertura"]))
         conn.commit()
         return {"ok": True}
     finally:
@@ -3045,10 +3060,17 @@ def crear_cheque_apertura(c: ChequeAperturaIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # El cheque, mientras está Pendiente, es una deuda (Pasivo) — misma lógica que
+            # cualquier saldo de apertura: contrapartida contra "Saldo Patrimonial de Apertura".
+            id_asiento = _crear_asiento(cur, "CHEQUE_APERTURA", f"Cheque apertura #{c.numero or ''}", date.fromisoformat(c.fecha_emision))
+            _agregar_lineas_asiento(cur, id_asiento, [
+                ("Saldo Patrimonial de Apertura", c.importe, 0, "Apertura de cheque"),
+                ("Valores Emitidos — Cheques Pendientes", 0, c.importe, "Apertura de cheque"),
+            ])
             cur.execute("""
-                INSERT INTO cheques_apertura (fecha_emision, fecha_cheque, numero, id_titular, importe, descripcion, debitado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
-            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.importe, c.descripcion, c.debitado))
+                INSERT INTO cheques_apertura (fecha_emision, fecha_cheque, numero, id_titular, importe, descripcion, debitado, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.importe, c.descripcion, c.debitado, id_asiento))
             id_nuevo = cur.fetchone()["id"]
             # Crear movimiento proyectado en cashflow si tiene fondo y no está debitado
             if c.id_fondo and not c.debitado:
@@ -3069,12 +3091,40 @@ def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT debitado, id_asiento_debito FROM cheques_apertura WHERE id = %s", (id,))
+            existente = cur.fetchone()
+            ya_debitado = existente["debitado"] if existente else False
+            id_asiento_debito = existente["id_asiento_debito"] if existente else None
+
             cur.execute("""
                 UPDATE cheques_apertura SET fecha_emision=%s, fecha_cheque=%s, numero=%s,
                 id_titular=%s, id_fondo=%s, importe=%s, descripcion=%s, debitado=%s
                 WHERE id=%s
             """, (c.fecha_emision, c.fecha_cheque, c.numero, c.id_titular, c.id_fondo, c.importe, c.descripcion, c.debitado, id))
-            # Actualizar cashflow proyectado
+
+            # Recién se marca Debitado (antes no lo estaba): la plata sale de verdad del banco.
+            # Segundo asiento: se cancela el Pasivo pendiente, y baja el Fondo real.
+            if c.debitado and not ya_debitado and c.id_fondo:
+                cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (c.id_fondo,))
+                fila_fondo = cur.fetchone()
+                cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else None)
+                if cuenta_fondo:
+                    nuevo_asiento = _crear_asiento(cur, "CHEQUE_APERTURA_DEBITO", f"Débito de cheque apertura #{c.numero or ''}", date.today())
+                    _agregar_lineas_asiento(cur, nuevo_asiento, [
+                        ("Valores Emitidos — Cheques Pendientes", c.importe, 0, "Débito de cheque"),
+                        (cuenta_fondo, 0, c.importe, "Débito de cheque"),
+                    ])
+                    cur.execute("UPDATE cheques_apertura SET id_asiento_debito = %s WHERE id = %s", (nuevo_asiento, id))
+            # Se destilda Debitado (antes sí lo estaba): se revierte el segundo asiento.
+            elif not c.debitado and ya_debitado and id_asiento_debito:
+                cur.execute("""
+                    UPDATE asientos SET anulado = true,
+                        fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                        motivo_anulacion = 'Vuelto a Pendiente'
+                    WHERE id = %s
+                """, (id_asiento_debito,))
+
+            # Actualizar cashflow proyectado (como ya hacía)
             fecha = date.fromisoformat(c.fecha_cheque)
             if c.debitado:
                 cur.execute("UPDATE cashflow SET confirmado=true WHERE id_cheque_apertura=%s", (id,))
@@ -3093,7 +3143,19 @@ def eliminar_cheque_apertura(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT id_asiento, id_asiento_debito FROM cheques_apertura WHERE id = %s", (id,))
+            row = cur.fetchone()
+            cur.execute("DELETE FROM cashflow WHERE id_cheque_apertura = %s", (id,))
             cur.execute("DELETE FROM cheques_apertura WHERE id=%s", (id,))
+            if row:
+                for id_asiento in [row["id_asiento"], row["id_asiento_debito"]]:
+                    if id_asiento is not None:
+                        cur.execute("""
+                            UPDATE asientos SET anulado = true,
+                                fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                                motivo_anulacion = 'Cheque de apertura eliminado'
+                            WHERE id = %s
+                        """, (id_asiento,))
         conn.commit()
         return {"ok": True}
     finally:
