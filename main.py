@@ -3155,6 +3155,38 @@ def anular_asiento(id: int, a: AnularAsientoIn):
     finally:
         conn.close()
 
+def _revertir_un_asiento(cur, id, motivo):
+    """El corazón de 'revertir todo' — separado en su propia función para poder usarse tanto
+    para UN asiento puntual como para TODOS de una vez (vaciar el sistema de prueba)."""
+    cur.execute("SELECT reversion_acciones FROM asientos WHERE id = %s", (id,))
+    fila = cur.fetchone()
+    acciones = fila["reversion_acciones"] if fila and fila["reversion_acciones"] else []
+
+    for accion in acciones:
+        tabla, where_col, where_val = accion["tabla"], accion["where_columna"], accion["where_valor"]
+        if accion["tipo"] == "DELETE":
+            cur.execute(f"DELETE FROM {tabla} WHERE {where_col} = %s", (where_val,))
+        elif accion["tipo"] == "UPDATE":
+            campos = accion["campos"]
+            sets = ", ".join(f"{k} = %s" for k in campos)
+            cur.execute(f"UPDATE {tabla} SET {sets} WHERE {where_col} = %s", (*campos.values(), where_val))
+
+    # Red de seguridad para asientos viejos, creados antes de que existiera
+    # 'reversion_acciones' — mismo comportamiento genérico de siempre (borrar todo lo
+    # que apunte directo a este asiento), por si 'acciones' vino vacío.
+    if not acciones:
+        cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_asiento = %s)", (id,))
+        cur.execute("DELETE FROM cashflow WHERE id_asiento = %s", (id,))
+        cur.execute("DELETE FROM operaciones WHERE id_asiento = %s", (id,))
+        cur.execute("DELETE FROM saldos_iniciales WHERE id_asiento = %s", (id,))
+
+    cur.execute("""
+        UPDATE asientos SET anulado = true,
+            fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+            motivo_anulacion = %s
+        WHERE id = %s
+    """, (motivo, id))
+
 @app.put("/asientos/{id}/revertir_todo")
 def revertir_todo_asiento(id: int, a: AnularAsientoIn):
     """Uso restringido (Emi/Tomy) — a diferencia de 'anular' (que solo marca el asiento), esto
@@ -3165,37 +3197,28 @@ def revertir_todo_asiento(id: int, a: AnularAsientoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT reversion_acciones FROM asientos WHERE id = %s", (id,))
-            fila = cur.fetchone()
-            acciones = fila["reversion_acciones"] if fila and fila["reversion_acciones"] else []
-
-            for accion in acciones:
-                tabla, where_col, where_val = accion["tabla"], accion["where_columna"], accion["where_valor"]
-                if accion["tipo"] == "DELETE":
-                    cur.execute(f"DELETE FROM {tabla} WHERE {where_col} = %s", (where_val,))
-                elif accion["tipo"] == "UPDATE":
-                    campos = accion["campos"]
-                    sets = ", ".join(f"{k} = %s" for k in campos)
-                    cur.execute(f"UPDATE {tabla} SET {sets} WHERE {where_col} = %s", (*campos.values(), where_val))
-
-            # Red de seguridad para asientos viejos, creados antes de que existiera
-            # 'reversion_acciones' — mismo comportamiento genérico de siempre (borrar todo lo
-            # que apunte directo a este asiento), por si 'acciones' vino vacío.
-            if not acciones:
-                cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_asiento = %s)", (id,))
-                cur.execute("DELETE FROM cashflow WHERE id_asiento = %s", (id,))
-                cur.execute("DELETE FROM operaciones WHERE id_asiento = %s", (id,))
-                cur.execute("DELETE FROM saldos_iniciales WHERE id_asiento = %s", (id,))
-
-            cur.execute("""
-                UPDATE asientos SET anulado = true,
-
-                    fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
-                    motivo_anulacion = %s
-                WHERE id = %s
-            """, (a.motivo or "Revertido por completo desde Libro Diario", id))
+            _revertir_un_asiento(cur, id, a.motivo or "Revertido por completo desde Libro Diario")
         conn.commit()
         return {"ok": True}
+    finally:
+        conn.close()
+
+@app.put("/asientos/revertir_todos_los_activos")
+def revertir_todos_los_asientos_activos():
+    """Botón sensible (Libro Diario, uso restringido) — revierte TODOS los asientos activos de
+    una sola vez, con el mismo mecanismo genérico de arriba. Vacía toda la actividad del
+    sistema (facturas, pagos, movimientos, saldos iniciales, cheques) dejando intactos los
+    datos NO patrimoniales (Titulares, Plan de Cuentas, Fondos, Configuración, Empleados) —
+    pensado para arrancar de cero después de cargar datos de prueba."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM asientos WHERE anulado = false ORDER BY id")
+            ids = [r["id"] for r in cur.fetchall()]
+            for id_asiento in ids:
+                _revertir_un_asiento(cur, id_asiento, "Vaciado completo del sistema (botón de prueba)")
+        conn.commit()
+        return {"ok": True, "cantidad": len(ids)}
     finally:
         conn.close()
 
