@@ -2870,7 +2870,7 @@ def get_asientos_con_lineas(tipo_origen: Optional[str] = None, incluir_anulados:
             ids = [a["id"] for a in asientos]
             lineas_por_asiento = {}
             if ids:
-                cur.execute("SELECT * FROM asiento_lineas WHERE id_asiento = ANY(%s) ORDER BY id", (ids,))
+                cur.execute("SELECT * FROM asiento_lineas WHERE id_asiento = ANY(%s) ORDER BY (haber > 0), id", (ids,))
                 for l in cur.fetchall():
                     lineas_por_asiento.setdefault(l["id_asiento"], []).append(l)
             for a in asientos:
