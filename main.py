@@ -3155,9 +3155,10 @@ def anular_asiento(id: int, a: AnularAsientoIn):
     finally:
         conn.close()
 
-def _revertir_un_asiento(cur, id, motivo):
-    """El corazón de 'revertir todo' — separado en su propia función para poder usarse tanto
-    para UN asiento puntual como para TODOS de una vez (vaciar el sistema de prueba)."""
+def _ejecutar_reversion(cur, id):
+    """Ejecuta lo que el asiento dejó anotado en 'reversion_acciones' (o la red de seguridad
+    genérica si no tiene nada anotado) — sin tocar el asiento en sí. Lo que se hace DESPUÉS con
+    el asiento (anularlo, dejando rastro, o borrarlo del todo) lo decide quien llama a esto."""
     cur.execute("SELECT reversion_acciones FROM asientos WHERE id = %s", (id,))
     fila = cur.fetchone()
     acciones = fila["reversion_acciones"] if fila and fila["reversion_acciones"] else []
@@ -3180,24 +3181,24 @@ def _revertir_un_asiento(cur, id, motivo):
         cur.execute("DELETE FROM operaciones WHERE id_asiento = %s", (id,))
         cur.execute("DELETE FROM saldos_iniciales WHERE id_asiento = %s", (id,))
 
-    cur.execute("""
-        UPDATE asientos SET anulado = true,
-            fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
-            motivo_anulacion = %s
-        WHERE id = %s
-    """, (motivo, id))
-
 @app.put("/asientos/{id}/revertir_todo")
 def revertir_todo_asiento(id: int, a: AnularAsientoIn):
     """Uso restringido (Emi/Tomy) — a diferencia de 'anular' (que solo marca el asiento), esto
     ANULA el asiento Y ejecuta lo que ese mismo asiento haya dejado anotado en
     'reversion_acciones' al momento de crearse (ver _set_reversion) — sin importar las reglas
     propias de cada pantalla. Genérico: agregar un tipo de asiento nuevo en el futuro NUNCA
-    requiere tocar esta función — alcanza con que, al crearlo, llame a _set_reversion()."""
+    requiere tocar esta función — alcanza con que, al crearlo, llame a _set_reversion().
+    Deja rastro (anulado=true), no borra el asiento en sí — para uso normal, día a día."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _revertir_un_asiento(cur, id, a.motivo or "Revertido por completo desde Libro Diario")
+            _ejecutar_reversion(cur, id)
+            cur.execute("""
+                UPDATE asientos SET anulado = true,
+                    fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                    motivo_anulacion = %s
+                WHERE id = %s
+            """, (a.motivo or "Revertido por completo desde Libro Diario", id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -3209,14 +3210,19 @@ def revertir_todos_los_asientos_activos():
     una sola vez, con el mismo mecanismo genérico de arriba. Vacía toda la actividad del
     sistema (facturas, pagos, movimientos, saldos iniciales, cheques) dejando intactos los
     datos NO patrimoniales (Titulares, Plan de Cuentas, Fondos, Configuración, Empleados) —
-    pensado para arrancar de cero después de cargar datos de prueba."""
+    pensado para arrancar de cero después de cargar datos de prueba.
+    A diferencia de revertir_todo_asiento: acá se BORRA el asiento entero (y sus líneas), no
+    se deja anulado — para que Libro Diario también quede vacío, sin asientos fantasma."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM asientos WHERE anulado = false ORDER BY id")
             ids = [r["id"] for r in cur.fetchall()]
             for id_asiento in ids:
-                _revertir_un_asiento(cur, id_asiento, "Vaciado completo del sistema (botón de prueba)")
+                _ejecutar_reversion(cur, id_asiento)
+            if ids:
+                cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = ANY(%s)", (ids,))
+                cur.execute("DELETE FROM asientos WHERE id = ANY(%s)", (ids,))
         conn.commit()
         return {"ok": True, "cantidad": len(ids)}
     finally:
