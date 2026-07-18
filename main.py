@@ -3206,19 +3206,21 @@ def revertir_todo_asiento(id: int, a: AnularAsientoIn):
 
 @app.put("/asientos/revertir_todos_los_activos")
 def revertir_todos_los_asientos_activos():
-    """Botón sensible (Libro Diario, uso restringido) — revierte TODOS los asientos activos de
-    una sola vez, con el mismo mecanismo genérico de arriba. Vacía toda la actividad del
-    sistema (facturas, pagos, movimientos, saldos iniciales, cheques) dejando intactos los
-    datos NO patrimoniales (Titulares, Plan de Cuentas, Fondos, Configuración, Empleados) —
-    pensado para arrancar de cero después de cargar datos de prueba.
-    A diferencia de revertir_todo_asiento: acá se BORRA el asiento entero (y sus líneas), no
-    se deja anulado — para que Libro Diario también quede vacío, sin asientos fantasma."""
+    """Botón sensible (Libro Diario, uso restringido) — revierte los asientos activos (con el
+    mismo mecanismo genérico de arriba) Y borra TODOS los asientos, estén anulados o no —
+    Libro Diario queda completamente en cero, sin ningún asiento fantasma de pruebas
+    anteriores. Vacía toda la actividad del sistema (facturas, pagos, movimientos, saldos
+    iniciales, cheques) dejando intactos los datos NO patrimoniales (Titulares, Plan de
+    Cuentas, Fondos, Configuración, Empleados) — pensado para arrancar de cero después de
+    cargar datos de prueba."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM asientos WHERE anulado = false ORDER BY id")
-            ids = [r["id"] for r in cur.fetchall()]
-            for id_asiento in ids:
+            cur.execute("SELECT id, anulado FROM asientos ORDER BY id")
+            filas = cur.fetchall()
+            ids = [r["id"] for r in filas]
+            ids_activos = [r["id"] for r in filas if not r["anulado"]]
+            for id_asiento in ids_activos:
                 _ejecutar_reversion(cur, id_asiento)
             if ids:
                 cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = ANY(%s)", (ids,))
