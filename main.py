@@ -2560,12 +2560,22 @@ def anular_echeq(id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
-            if not cur.fetchone():
+            cur.execute("SELECT id, id_asiento FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
+            cheque = cur.fetchone()
+            if not cheque:
                 return {"ok": False, "error": "No es un ECheq"}
             cur.execute("UPDATE cheques_emitidos SET estado='ANULADO' WHERE id_cashflow = %s", (id,))
             cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago = %s", (id,))
             cur.execute("UPDATE cashflow SET confirmado=true, importe=0 WHERE id = %s", (id,))
+            # El paso que faltaba: anular el asiento de emisión (cancela la deuda al Titular,
+            # sube "Valores Emitidos") — sino Balance sigue contando un cheque que se anuló.
+            if cheque["id_asiento"]:
+                cur.execute("""
+                    UPDATE asientos SET anulado = true,
+                        fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
+                        motivo_anulacion = 'ECheq anulado desde Tesorería'
+                    WHERE id = %s
+                """, (cheque["id_asiento"],))
         conn.commit()
         return {"ok": True}
     finally:
