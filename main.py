@@ -3053,6 +3053,15 @@ def revertir_todo_asiento(id: int, a: AnularAsientoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Buscar cheques de apertura vinculados a este asiento (como asiento de apertura o
+            # como asiento de débito) — cubre tanto los nuevos (con id_asiento en cashflow) como
+            # los viejos, cargados antes de que esa columna existiera.
+            cur.execute("SELECT id FROM cheques_apertura WHERE id_asiento = %s OR id_asiento_debito = %s", (id, id))
+            ids_cheques = [r["id"] for r in cur.fetchall()]
+            if ids_cheques:
+                cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_cheque_apertura = ANY(%s))", (ids_cheques,))
+                cur.execute("DELETE FROM cashflow WHERE id_cheque_apertura = ANY(%s)", (ids_cheques,))
+                cur.execute("DELETE FROM cheques_apertura WHERE id = ANY(%s)", (ids_cheques,))
             # Rompemos las referencias cruzadas antes de borrar, para no chocar contra las FK.
             cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_asiento = %s)", (id,))
             cur.execute("DELETE FROM cashflow WHERE id_asiento = %s", (id,))
@@ -3138,11 +3147,11 @@ def crear_cheque_apertura(c: ChequeAperturaIn):
             if c.id_fondo and not c.debitado:
                 fecha = date.fromisoformat(c.fecha_cheque)
                 cur.execute("""
-                    INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_cheque_apertura)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, false, %s)
+                    INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_cheque_apertura, id_asiento)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, false, %s, %s)
                 """, (fecha.month, fecha, c.id_titular, 'Valores Emitidos — Cheques Pendientes',
                       f"Cheque apertura #{c.numero or ''} - {c.descripcion or ''}", 
-                      -abs(c.importe), c.id_fondo, id_nuevo))
+                      -abs(c.importe), c.id_fondo, id_nuevo, id_asiento))
         conn.commit()
         return {"ok": True, "id": id_nuevo}
     finally:
