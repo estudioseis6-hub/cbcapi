@@ -3275,7 +3275,7 @@ def _lineas_apertura(cur, cuenta_patrimonial, importe):
     fila = cur.fetchone()
     lado = fila["niv2_desc"] if fila else None
     monto = abs(importe)
-    if lado == "Pasivo":
+    if lado == "Pasivos":
         return [
             (cuenta_patrimonial, 0, monto, "Apertura"),
             ("Saldo Patrimonial de Apertura", monto, 0, "Apertura"),
