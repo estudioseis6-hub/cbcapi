@@ -3,6 +3,7 @@
 # ============================================================
 from dotenv import load_dotenv
 import pathlib
+import json
 load_dotenv(dotenv_path=pathlib.Path(__file__).parent / ".env")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -339,6 +340,40 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
                             (cuenta_fondo, 0, cheque["importe"], "Débito de cheque"),
                         ])
                         cur.execute("UPDATE cheques_apertura SET id_asiento_debito = %s WHERE id = %s", (nuevo_asiento, row["id_cheque_apertura"]))
+                        # Si se revierte este asiento: NO se borra el cheque, vuelve a Pendiente
+                        # y su proyección en Tesorería se des-confirma (no se borra).
+                        _set_reversion(cur, nuevo_asiento, [
+                            {"tabla": "cheques_apertura", "where_columna": "id", "where_valor": row["id_cheque_apertura"], "tipo": "UPDATE",
+                             "campos": {"debitado": False, "id_asiento_debito": None}},
+                            {"tabla": "cashflow", "where_columna": "id_cheque_apertura", "where_valor": row["id_cheque_apertura"], "tipo": "UPDATE",
+                             "campos": {"confirmado": False}},
+                        ])
+
+            # Si es un ECheq emitido para pagar una factura (registrar_pago_echeq), el mismo
+            # criterio que un cheque de apertura: al confirmarse el débito, se cancela la deuda
+            # de "Valores Emitidos" y baja el Fondo real.
+            cur.execute("SELECT id, id_asiento_debito FROM cheques_emitidos WHERE id_cashflow = %s", (id,))
+            cheque_emitido = cur.fetchone()
+            if cheque_emitido and not cheque_emitido["id_asiento_debito"] and row and row["id_fondo"]:
+                cur.execute("SELECT importe FROM cashflow WHERE id = %s", (id,))
+                fila_cf = cur.fetchone()
+                importe_echeq = abs(fila_cf["importe"]) if fila_cf else 0
+                cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (row["id_fondo"],))
+                fila_fondo = cur.fetchone()
+                cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else None)
+                if cuenta_fondo and importe_echeq:
+                    nuevo_asiento = _crear_asiento(cur, "PAGO_ECHEQ_DEBITO", "Débito de ECheq emitido", fecha)
+                    _agregar_lineas_asiento(cur, nuevo_asiento, [
+                        ("Valores Emitidos — Cheques Pendientes", importe_echeq, 0, "Débito de ECheq"),
+                        (cuenta_fondo, 0, importe_echeq, "Débito de ECheq"),
+                    ])
+                    cur.execute("UPDATE cheques_emitidos SET id_asiento_debito = %s WHERE id_cashflow = %s", (nuevo_asiento, id))
+                    _set_reversion(cur, nuevo_asiento, [
+                        {"tabla": "cheques_emitidos", "where_columna": "id_cashflow", "where_valor": id, "tipo": "UPDATE",
+                         "campos": {"id_asiento_debito": None, "estado": "EMITIDO"}},
+                        {"tabla": "cashflow", "where_columna": "id", "where_valor": id, "tipo": "UPDATE",
+                         "campos": {"confirmado": False}},
+                    ])
         conn.commit()
         return {"ok": True}
     finally:
@@ -391,6 +426,9 @@ def crear_movimiento(m: MovimientoIn):
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado, id_asiento))
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id_asiento": id_asiento}
     finally:
@@ -428,11 +466,18 @@ def crear_acreditacion_tarjetas(a: AcreditacionTarjetasIn):
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (fecha.month, fecha, id_titular_generico, "Tarj. Credit. Pend. Acreditacion", detalle, monto, a.id_fondo, confirmado, id_asiento))
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id_asiento": id_asiento}
     finally:
         conn.close()
 
+class TransferenciaIn(BaseModel):
+    fecha: str
+    id_fondo_origen: int
+    id_fondo_destino: int
     importe: float
     detalle: str = ""
 
@@ -470,6 +515,9 @@ def crear_transferencia(t: TransferenciaIn):
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (fecha.month, fecha, 716, "Transferencias", detalle, abs(t.importe), t.id_fondo_destino, confirmado, id_transf, id_asiento))
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id_transferencia": id_transf, "id_asiento": id_asiento}
     finally:
@@ -686,6 +734,10 @@ def crear_comprobante(c: ComprobanteIn):
                 INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, false)
             """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "cashflow", "where_columna": "id_operacion", "where_valor": id_operacion, "tipo": "DELETE"},
+                {"tabla": "operaciones", "where_columna": "id", "where_valor": id_operacion, "tipo": "DELETE"},
+            ])
             conn.commit()
             return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal}
     finally:
@@ -853,13 +905,31 @@ def registrar_pago(p: PagoIn):
             proyectados = [r["id"] for r in cur.fetchall()]
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
+            # El asiento del pago: se cancela la deuda (Debe, el Pasivo baja) y baja el Fondo
+            # real (Haber) — sin esto, Balance nunca se enteraba de que la factura se pagó.
+            cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (p.id_fondo,))
+            fila_fondo = cur.fetchone()
+            cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{p.id_fondo}")
+            monto = abs(total)
+            id_asiento = _crear_asiento(cur, "PAGO", p.detalle or f"Pago a Titular #{p.id_titular}", fecha)
+            _agregar_lineas_asiento(cur, id_asiento, [
+                (p.cod_cuenta, monto, 0, p.detalle),
+                (cuenta_fondo, 0, monto, p.detalle),
+            ])
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, true)
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s)
                 RETURNING id
-            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo, id_asiento))
             id_pago = cur.fetchone()["id"]
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
+            # Si se revierte: se deshace el pago (vuelve a deberse) y se desvincula la factura,
+            # que vuelve a quedar impaga — no se borra la factura en sí, solo el pago.
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "operaciones", "where_columna": "id_pago", "where_valor": id_pago, "tipo": "UPDATE",
+                 "campos": {"id_pago": None}},
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id_pago": id_pago, "total": total}
     finally:
@@ -891,17 +961,33 @@ def registrar_pago_echeq(p: PagoECheqIn):
             proyectados = [r["id"] for r in cur.fetchall()]
             if proyectados:
                 cur.execute("DELETE FROM cashflow WHERE id = ANY(%s)", (proyectados,))
+            monto = abs(total)
+            # Al emitir el cheque, se cancela la deuda con el Titular (Debe) y aparece una
+            # deuda nueva: "Valores Emitidos — Cheques Pendientes" (Haber) — el cheque todavía
+            # no salió del banco de verdad, eso pasa después, cuando se confirme el débito.
+            id_asiento = _crear_asiento(cur, "PAGO_ECHEQ", p.detalle or f"Cheque emitido #{p.nro_cheque}", fecha_emision)
+            _agregar_lineas_asiento(cur, id_asiento, [
+                (p.cod_cuenta, monto, 0, p.detalle),
+                ("Valores Emitidos — Cheques Pendientes", 0, monto, p.detalle),
+            ])
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, false, %s)
                 RETURNING id
-            """, (fecha_vto.month, fecha_vto, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo))
+            """, (fecha_vto.month, fecha_vto, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo, id_asiento))
             id_cashflow = cur.fetchone()["id"]
             cur.execute("""
-                INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow)
-                VALUES (%s, %s, %s, 'EMITIDO', %s)
-            """, (p.nro_cheque, fecha_emision, fecha_vto, id_cashflow))
+                INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow, id_asiento)
+                VALUES (%s, %s, %s, 'EMITIDO', %s, %s)
+            """, (p.nro_cheque, fecha_emision, fecha_vto, id_cashflow, id_asiento))
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_cashflow, p.ids_operaciones))
+            # Si se revierte: el cheque nunca se emitió, la factura vuelve a quedar impaga.
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "operaciones", "where_columna": "id_pago", "where_valor": id_cashflow, "tipo": "UPDATE",
+                 "campos": {"id_pago": None}},
+                {"tabla": "cheques_emitidos", "where_columna": "id_cashflow", "where_valor": id_cashflow, "tipo": "DELETE"},
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id_cashflow": id_cashflow, "total": total}
     finally:
@@ -2904,6 +2990,22 @@ def _agregar_lineas_asiento(cur, id_asiento, lineas):
             (id_asiento, cuenta, debe, haber, desc)
         )
 
+def _set_reversion(cur, id_asiento, acciones):
+    """PRINCIPIO GENERAL: cada asiento tiene que dejar anotado, en el momento en que se crea,
+    exactamente qué hay que deshacer si algún día se lo revierte — así 'revertir_todo_asiento'
+    nunca necesita saber a mano qué es un cheque, una transferencia, o cualquier cosa nueva que
+    se agregue en el futuro; el asiento ya lo trae escrito.
+
+    'acciones' es una lista de diccionarios, cada uno describe UNA acción a ejecutar:
+      - Para borrar una fila (o varias que compartan un valor): 
+          {"tabla": "operaciones", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"}
+      - Para actualizar campos en vez de borrar (ej. "volver a Pendiente" sin borrar el registro):
+          {"tabla": "cheques_apertura", "where_columna": "id", "where_valor": 7, "tipo": "UPDATE",
+           "campos": {"debitado": False, "id_asiento_debito": None}}
+    'where_valor' casi siempre es el propio id_asiento, salvo que la acción tenga que apuntar a
+    un id específico de otra tabla (ej. el id de la fila de cheques_apertura)."""
+    cur.execute("UPDATE asientos SET reversion_acciones = %s WHERE id = %s", (json.dumps(acciones), id_asiento))
+
 @app.post("/asientos")
 def crear_asiento(a: AsientoIn):
     conn = get_conn()
@@ -3046,29 +3148,38 @@ def anular_asiento(id: int, a: AnularAsientoIn):
 @app.put("/asientos/{id}/revertir_todo")
 def revertir_todo_asiento(id: int, a: AnularAsientoIn):
     """Uso restringido (Emi/Tomy) — a diferencia de 'anular' (que solo marca el asiento), esto
-    ANULA el asiento Y borra de verdad cualquier fila en operaciones/cashflow/saldos_iniciales
-    que tenga este mismo id_asiento — sin importar las reglas propias de cada pantalla (ej. no
-    chequea si una factura ya está pagada). Pensado para corregir un error de carga de punta a
-    punta, desde el Libro Diario, sin tener que ir pantalla por pantalla."""
+    ANULA el asiento Y ejecuta lo que ese mismo asiento haya dejado anotado en
+    'reversion_acciones' al momento de crearse (ver _set_reversion) — sin importar las reglas
+    propias de cada pantalla. Genérico: agregar un tipo de asiento nuevo en el futuro NUNCA
+    requiere tocar esta función — alcanza con que, al crearlo, llame a _set_reversion()."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Buscar cheques de apertura vinculados a este asiento (como asiento de apertura o
-            # como asiento de débito) — cubre tanto los nuevos (con id_asiento en cashflow) como
-            # los viejos, cargados antes de que esa columna existiera.
-            cur.execute("SELECT id FROM cheques_apertura WHERE id_asiento = %s OR id_asiento_debito = %s", (id, id))
-            ids_cheques = [r["id"] for r in cur.fetchall()]
-            if ids_cheques:
-                cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_cheque_apertura = ANY(%s))", (ids_cheques,))
-                cur.execute("DELETE FROM cashflow WHERE id_cheque_apertura = ANY(%s)", (ids_cheques,))
-                cur.execute("DELETE FROM cheques_apertura WHERE id = ANY(%s)", (ids_cheques,))
-            # Rompemos las referencias cruzadas antes de borrar, para no chocar contra las FK.
-            cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_asiento = %s)", (id,))
-            cur.execute("DELETE FROM cashflow WHERE id_asiento = %s", (id,))
-            cur.execute("DELETE FROM operaciones WHERE id_asiento = %s", (id,))
-            cur.execute("DELETE FROM saldos_iniciales WHERE id_asiento = %s", (id,))
+            cur.execute("SELECT reversion_acciones FROM asientos WHERE id = %s", (id,))
+            fila = cur.fetchone()
+            acciones = fila["reversion_acciones"] if fila and fila["reversion_acciones"] else []
+
+            for accion in acciones:
+                tabla, where_col, where_val = accion["tabla"], accion["where_columna"], accion["where_valor"]
+                if accion["tipo"] == "DELETE":
+                    cur.execute(f"DELETE FROM {tabla} WHERE {where_col} = %s", (where_val,))
+                elif accion["tipo"] == "UPDATE":
+                    campos = accion["campos"]
+                    sets = ", ".join(f"{k} = %s" for k in campos)
+                    cur.execute(f"UPDATE {tabla} SET {sets} WHERE {where_col} = %s", (*campos.values(), where_val))
+
+            # Red de seguridad para asientos viejos, creados antes de que existiera
+            # 'reversion_acciones' — mismo comportamiento genérico de siempre (borrar todo lo
+            # que apunte directo a este asiento), por si 'acciones' vino vacío.
+            if not acciones:
+                cur.execute("UPDATE operaciones SET id_pago = NULL WHERE id_pago IN (SELECT id FROM cashflow WHERE id_asiento = %s)", (id,))
+                cur.execute("DELETE FROM cashflow WHERE id_asiento = %s", (id,))
+                cur.execute("DELETE FROM operaciones WHERE id_asiento = %s", (id,))
+                cur.execute("DELETE FROM saldos_iniciales WHERE id_asiento = %s", (id,))
+
             cur.execute("""
                 UPDATE asientos SET anulado = true,
+
                     fecha_anulacion = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires'),
                     motivo_anulacion = %s
                 WHERE id = %s
@@ -3152,6 +3263,12 @@ def crear_cheque_apertura(c: ChequeAperturaIn):
                 """, (fecha.month, fecha, c.id_titular, 'Valores Emitidos — Cheques Pendientes',
                       f"Cheque apertura #{c.numero or ''} - {c.descripcion or ''}", 
                       -abs(c.importe), c.id_fondo, id_nuevo, id_asiento))
+            # Si algún día se revierte este asiento: el cheque nunca existió, se borra entero
+            # (y su cashflow, si tenía uno).
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "cashflow", "where_columna": "id_cheque_apertura", "where_valor": id_nuevo, "tipo": "DELETE"},
+                {"tabla": "cheques_apertura", "where_columna": "id", "where_valor": id_nuevo, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id": id_nuevo}
     finally:
@@ -3201,6 +3318,12 @@ def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
                         (cuenta_fondo, 0, c.importe, "Débito de cheque"),
                     ])
                     cur.execute("UPDATE cheques_apertura SET id_asiento_debito = %s WHERE id = %s", (nuevo_asiento, id))
+                    _set_reversion(cur, nuevo_asiento, [
+                        {"tabla": "cheques_apertura", "where_columna": "id", "where_valor": id, "tipo": "UPDATE",
+                         "campos": {"debitado": False, "id_asiento_debito": None}},
+                        {"tabla": "cashflow", "where_columna": "id_cheque_apertura", "where_valor": id, "tipo": "UPDATE",
+                         "campos": {"confirmado": False}},
+                    ])
             # Se destilda Debitado (antes sí lo estaba): se revierte el segundo asiento.
             elif not c.debitado and ya_debitado and id_asiento_debito:
                 cur.execute("""
@@ -3378,6 +3501,9 @@ def crear_saldo_inicial(s: SaldoInicialIn):
                     UPDATE saldos_iniciales SET fecha=%s, importe=%s, descripcion=%s, id_asiento=%s
                     WHERE id = %s
                 """, (s.fecha, s.importe, s.descripcion, id_asiento, existente["id"]))
+                _set_reversion(cur, id_asiento, [
+                    {"tabla": "saldos_iniciales", "where_columna": "id", "where_valor": existente["id"], "tipo": "DELETE"},
+                ])
                 conn.commit()
                 return {"ok": True, "id": existente["id"], "id_asiento": id_asiento}
 
@@ -3388,6 +3514,9 @@ def crear_saldo_inicial(s: SaldoInicialIn):
                 VALUES (%s, %s, %s, %s, %s) RETURNING id
             """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento))
             id_nuevo = cur.fetchone()["id"]
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "saldos_iniciales", "where_columna": "id", "where_valor": id_nuevo, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True, "id": id_nuevo, "id_asiento": id_asiento}
     finally:
@@ -3411,6 +3540,9 @@ def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
                 UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s, id_asiento=%s
                 WHERE id=%s
             """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento, id))
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "saldos_iniciales", "where_columna": "id", "where_valor": id, "tipo": "DELETE"},
+            ])
         conn.commit()
         return {"ok": True}
     finally:
