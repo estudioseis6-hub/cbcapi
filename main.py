@@ -52,6 +52,9 @@ def get_fondos():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT valor FROM configuracion WHERE clave = 'fecha_inicio_sistema'")
+            fila_corte = cur.fetchone()
+            fecha_corte = fila_corte["valor"] if fila_corte else None
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
                        COALESCE(si.importe, 0) AS saldo_inicial,
@@ -61,11 +64,11 @@ def get_fondos():
                 FROM fondos f
                 LEFT JOIN cashflow c ON c.id_fondo = f.id
                 LEFT JOIN saldos_iniciales si ON si.cuenta_patrimonial = f.cuenta_patrimonial
-                    AND si.fecha = '2026-05-31'
+                    AND si.fecha = %s
                 WHERE f.slot IS NOT NULL
                 GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, si.importe, f.slot, f.abrev, f.grupo
                 ORDER BY f.orden
-            """)
+            """, (fecha_corte,))
             return cur.fetchall()
     finally:
         conn.close()
