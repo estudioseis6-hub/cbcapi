@@ -108,17 +108,43 @@ def actualizar_fondo(id: int, f: FondoUpdateIn):
 
 class FondoIn(BaseModel):
     nombre: str
+    abrev: str
     tipo: str
     moneda: str
+    grupo: str  # "CORRIENTE" (día a día) o "NO_CORRIENTE" (reserva)
     saldo_inicial: float
+    nombre_cuenta_contable: str
 
 @app.post("/fondos")
 def crear_fondo(f: FondoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO fondos (nombre, tipo, moneda, saldo_inicial, es_sistema) VALUES (%s, %s, %s, %s, false)",
-                       (f.nombre, f.tipo, f.moneda, f.saldo_inicial))
+            # Efectivo va dentro de "Efectivo Circulante" (niv5=1); cualquier otro tipo (Banco,
+            # Billetera, etc.) va dentro de "Cuentas Bancarias y Otras" (niv5=2) — mismos
+            # niveles 1-4 ya fijos para toda cuenta de Disponibilidades.
+            niv5 = 1 if f.tipo == "Efectivo" else 2
+            niv5_desc = "Efectivo Circulante" if niv5 == 1 else "Cuentas Bancarias y Otras"
+            cur.execute("""
+                SELECT COALESCE(MAX(niv6), 0) AS maximo FROM plan_de_cuentas
+                WHERE niv1 = 2 AND niv2 = 1 AND niv3 = 1 AND niv4 = 1 AND niv5 = %s
+            """, (niv5,))
+            siguiente_niv6 = cur.fetchone()["maximo"] + 1
+            id_codigo = f"2.1.1.1.{niv5}.{siguiente_niv6}."
+            cur.execute("""
+                INSERT INTO plan_de_cuentas
+                    (niv1, niv1_desc, niv2, niv2_desc, niv3, niv3_desc, niv4, niv4_desc, niv5, niv5_desc, niv6, niv6_desc, nombre, id_codigo, activo)
+                VALUES (2, 'Patrimonial', 1, 'Activo', 1, 'Activos Corrientes', 1, 'Disponibilidades', %s, %s, %s, %s, %s, %s, true)
+            """, (niv5, niv5_desc, siguiente_niv6, f.nombre_cuenta_contable, f.nombre_cuenta_contable, id_codigo))
+            # "slot" solo marca que el Fondo está activo/visible (no es una posición fija de
+            # columna) y "orden" define en qué lugar aparece — el siguiente disponible.
+            cur.execute("SELECT COALESCE(MAX(slot), 0) AS s, COALESCE(MAX(orden), 0) AS o FROM fondos")
+            fila = cur.fetchone()
+            siguiente_slot, siguiente_orden = fila["s"] + 1, fila["o"] + 1
+            cur.execute("""
+                INSERT INTO fondos (nombre, abrev, tipo, moneda, grupo, saldo_inicial, es_sistema, cuenta_patrimonial, slot, orden, activo)
+                VALUES (%s, %s, %s, %s, %s, %s, false, %s, %s, %s, true)
+            """, (f.nombre, f.abrev, f.tipo, f.moneda, f.grupo, f.saldo_inicial, f.nombre_cuenta_contable, siguiente_slot, siguiente_orden))
         conn.commit()
         return {"ok": True}
     finally:
