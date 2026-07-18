@@ -3291,6 +3291,25 @@ def crear_saldo_inicial(s: SaldoInicialIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Si ya existe un saldo inicial cargado para esta misma cuenta, se reemplaza
+            # (mismo criterio que el PUT) — así "editar" no suma un asiento nuevo arriba del
+            # anterior, sino que corrige el que ya estaba.
+            cur.execute("SELECT id, id_asiento FROM saldos_iniciales WHERE cuenta_patrimonial = %s ORDER BY id LIMIT 1", (s.cuenta_patrimonial,))
+            existente = cur.fetchone()
+            if existente:
+                id_asiento = existente["id_asiento"]
+                if id_asiento is not None:
+                    cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = %s", (id_asiento,))
+                else:
+                    id_asiento = _crear_asiento(cur, "APERTURA", f"Apertura: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
+                _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
+                cur.execute("""
+                    UPDATE saldos_iniciales SET fecha=%s, importe=%s, descripcion=%s, id_asiento=%s
+                    WHERE id = %s
+                """, (s.fecha, s.importe, s.descripcion, id_asiento, existente["id"]))
+                conn.commit()
+                return {"ok": True, "id": existente["id"], "id_asiento": id_asiento}
+
             id_asiento = _crear_asiento(cur, "APERTURA", f"Apertura: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
             _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
             cur.execute("""
