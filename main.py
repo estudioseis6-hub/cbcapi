@@ -367,10 +367,43 @@ def crear_movimiento(m: MovimientoIn):
     finally:
         conn.close()
 
-class TransferenciaIn(BaseModel):
+class AcreditacionTarjetasIn(BaseModel):
     fecha: str
-    id_fondo_origen: int
-    id_fondo_destino: int
+    id_fondo: int
+    importe: float
+
+@app.post("/acreditacion_tarjetas")
+def crear_acreditacion_tarjetas(a: AcreditacionTarjetasIn):
+    """Carga rápida: solo pide Fecha, Fondo e Importe — la cuenta contable
+    ('Tarj. Credit. Pend. Acreditacion') ya se sabe de antemano, no hace falta elegirla."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(a.fecha)
+            confirmado = fecha <= date.today()
+            monto = abs(a.importe)
+            detalle = f"Acreditación de tarjetas (${monto:,.1f})"
+            id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", detalle, fecha)
+            cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (a.id_fondo,))
+            fila_fondo = cur.fetchone()
+            cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{a.id_fondo}")
+            cur.execute("SELECT id FROM titulares WHERE nombre = 'Ingresos Generales' LIMIT 1")
+            fila_titular = cur.fetchone()
+            id_titular_generico = fila_titular["id"] if fila_titular else None
+            # Entra plata al banco (Debe) / se cancela el crédito pendiente (Haber).
+            _agregar_lineas_asiento(cur, id_asiento, [
+                (cuenta_fondo, monto, 0, detalle),
+                ("Tarj. Credit. Pend. Acreditacion", 0, monto, detalle),
+            ])
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, id_titular_generico, "Tarj. Credit. Pend. Acreditacion", detalle, monto, a.id_fondo, confirmado, id_asiento))
+        conn.commit()
+        return {"ok": True, "id_asiento": id_asiento}
+    finally:
+        conn.close()
+
     importe: float
     detalle: str = ""
 
