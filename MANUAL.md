@@ -211,6 +211,18 @@ Ya conectado, con líneas completas: Movimiento manual de Tesorería, Transferen
 No conectado todavía (sin líneas de asiento): Registrar Pago, Cheques de Apertura, Vencimientos/confirmar.
 ---
 PARTE 3 — PENDIENTES (lista viva, actualizar seguido)
+Criterio de diseño: guardado explícito, no automático
+Ningún campo editable debería guardar solo al perder el foco (`onBlur`) — si la persona cambia de ventana (a un Excel, por ejemplo) a mitad de tipear un número largo, se guarda la mitad sin darse cuenta. Regla: solo Enter guarda; perder el foco sin Enter cancela (no guarda nada). Esto ya se aplicó a la celda de carga de Saldos Iniciales en Balance — aplicar el mismo criterio a cualquier campo editable nuevo que se construya de acá en más.
+PRINCIPIO CENTRAL — Reconciliación obligatoria (Emi, altísima prioridad)
+Balance es simplemente el resultado de Libro Diario (que hoy funciona también como Mayor). Lo que diga Libro Diario es lo que dice Balance — no hay una fuente de verdad paralela.
+De acá se desprende una regla que el sistema tiene que verificar siempre, en todo momento: el saldo de cada registro individual tiene que coincidir con lo que dice el Libro Diario/Mayor para esa misma cuenta. Por ejemplo:
+El saldo de cada Fondo en Tesorería = lo que el Libro Diario acumula para esa cuenta de Fondo.
+El total adeudado en Cuenta Corriente (por Titular, y en general) = lo que el Libro Diario acumula para "Proveedores a Pagar" (o la cuenta que corresponda).
+Cualquier otro total mostrado en cualquier pantalla, que derive de una cuenta patrimonial, tiene que coincidir con el Libro Diario para esa cuenta.
+Nunca puede pasar que una pantalla diga "se debe" y el Balance diga "no se debe" (o viceversa) — es exactamente el problema que se detectó hoy con "Anular" en Libro Diario (anulaba el asiento pero la factura seguía viva en Cuenta Corriente). Por eso se sacó ese botón — ver más abajo.
+Pendiente de construir: algún mecanismo de control/auditoría que chequee esto automáticamente (ej. un botón o proceso que compare saldo por saldo entre cada pantalla y lo que dice Libro Diario, y avise si hay una diferencia) — todavía no existe, pero es la garantía de fondo de que todo el sistema es confiable. Diseñar con calma cuando se retome.
+Decisión de hoy: sacar "Anular" de Libro Diario, dejar solo "Revertir todo"
+Se discutió si mantener los dos botones (Anular = solo marca el asiento; Revertir todo = anula y borra la fila real que lo generó). Se concluyó que "Revertir todo" siempre hace al menos lo mismo que "Anular", y nunca deja el problema de "asiento anulado pero el registro original sigue vivo en su pantalla" (que rompe justamente el principio de reconciliación de arriba). Por eso se sacó "Anular" — Libro Diario ahora solo tiene "Revertir todo". El "Eliminar" propio de cada pantalla (Cuenta Corriente, Tesorería) sigue funcionando igual, con sus propias reglas de negocio, y ya anula el asiento correctamente al usarse.
 Prioridad 1 — Terminar de conectar `asientos`/`asiento_lineas`
 [ ] Bug encontrado hoy: `eliminar_operacion` no anula el asiento vinculado. Borra la fila de `operaciones` y la proyección de `cashflow`, pero el asiento (y sus líneas de débito/crédito) queda activo — Balance sigue contando algo que ya no existe en ningún otro lado. Hay que revisar TODOS los endpoints de eliminar (no solo este) para el mismo agujero.
 [ ] Diseño de eliminación bidireccional, ya acordado con Emi:
