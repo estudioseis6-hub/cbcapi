@@ -2640,10 +2640,34 @@ def actualizar_cashflow(id: int, c: CashflowUpdateIn):
     try:
         with conn.cursor() as cur:
             if c.importe is not None:
+                cur.execute("SELECT id_asiento, cod_cuenta, id_fondo, id_transferencia, importe AS importe_actual FROM cashflow WHERE id = %s", (id,))
+                row = cur.fetchone()
+                if row and row["id_transferencia"]:
+                    # Una transferencia tiene dos patas (egreso/ingreso) compartiendo un solo
+                    # asiento — editar el importe de una sola pata acá las desincronizaría.
+                    return {"ok": False, "error": "No se puede editar el importe de una transferencia desde acá — eliminala y volvé a cargarla."}
+                if row and row["id_asiento"] and row["cod_cuenta"]:
+                    cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (row["id_fondo"],))
+                    fila_fondo = cur.fetchone()
+                    cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else None)
+                    if cuenta_fondo:
+                        monto = abs(c.importe)
+                        if c.importe < 0:
+                            lineas = [(row["cod_cuenta"], monto, 0, None), (cuenta_fondo, 0, monto, None)]
+                        else:
+                            lineas = [(cuenta_fondo, monto, 0, None), (row["cod_cuenta"], 0, monto, None)]
+                        cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = %s", (row["id_asiento"],))
+                        _agregar_lineas_asiento(cur, row["id_asiento"], lineas)
                 cur.execute("UPDATE cashflow SET importe=%s WHERE id=%s", (c.importe, id))
             if c.fecha is not None:
                 fecha = date.fromisoformat(c.fecha)
                 cur.execute("UPDATE cashflow SET fecha=%s, mes=%s WHERE id=%s", (fecha, fecha.month, id))
+                # La fecha del asiento tiene que seguir a la del movimiento — sino Balance
+                # sigue contando el hecho en el mes viejo, aunque Tesorería ya lo muestre en el nuevo.
+                cur.execute("SELECT id_asiento FROM cashflow WHERE id = %s", (id,))
+                row_fecha = cur.fetchone()
+                if row_fecha and row_fecha["id_asiento"]:
+                    cur.execute("UPDATE asientos SET fecha = %s WHERE id = %s", (fecha, row_fecha["id_asiento"]))
             if c.detalle is not None:
                 cur.execute("UPDATE cashflow SET detalle=%s WHERE id=%s", (c.detalle, id))
         conn.commit()
