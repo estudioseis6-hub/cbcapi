@@ -172,7 +172,7 @@ def get_titulares():
 
 class TitularIn(BaseModel):
     nombre: str
-    nivel1: str
+    nivel1: Optional[str] = None
     nivel2: Optional[str] = None
     nivel3: Optional[str] = None
     nivel4: Optional[str] = None
