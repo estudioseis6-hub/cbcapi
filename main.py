@@ -262,7 +262,7 @@ def get_cashflow(mes: Optional[int] = None, id_fondo: Optional[int] = None):
             sql = """
                 SELECT c.id, c.fecha, t.nombre titular, f.nombre fondo,
                        c.detalle, c.importe, c.cod_cuenta, c.id_fondo,
-                       c.confirmado, c.id_operacion, c.id_titular,
+                       c.confirmado, c.id_operacion, c.id_titular, c.id_cheque_apertura,
                        ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
                        ch.estado AS estado_cheque,
                        EXISTS(SELECT 1 FROM operaciones o WHERE o.id_pago = c.id) AS cancela_cc,
