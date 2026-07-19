@@ -395,6 +395,30 @@ def reprogramar_vencimiento(id: int, body: ReprogramarIn):
     finally:
         conn.close()
 
+def _crear_movimiento_manual(cur, fecha_str, id_titular, cod_cuenta, id_fondo, detalle, importe):
+    """El corazón de Movimiento Manual — separado para poder reusarse desde la carga masiva,
+    sin duplicar la lógica del asiento."""
+    fecha = date.fromisoformat(fecha_str)
+    confirmado = fecha <= date.today()
+    id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", detalle, fecha)
+    cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (id_fondo,))
+    fila_fondo = cur.fetchone()
+    cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{id_fondo}")
+    monto = abs(importe)
+    if importe < 0:
+        lineas = [(cod_cuenta, monto, 0, detalle), (cuenta_fondo, 0, monto, detalle)]
+    else:
+        lineas = [(cuenta_fondo, monto, 0, detalle), (cod_cuenta, 0, monto, detalle)]
+    _agregar_lineas_asiento(cur, id_asiento, lineas)
+    cur.execute("""
+        INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (fecha.month, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento))
+    _set_reversion(cur, id_asiento, [
+        {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+    ])
+    return id_asiento
+
 class MovimientoIn(BaseModel):
     fecha: str
     id_titular: int
@@ -408,29 +432,55 @@ def crear_movimiento(m: MovimientoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            fecha = date.fromisoformat(m.fecha)
-            confirmado = fecha <= date.today()
-            id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", m.detalle, fecha)
-            # Líneas reales del asiento: si es un egreso, el Fondo se acredita (sale plata) y la
-            # cuenta de gasto se debita. Si es un ingreso, al revés.
-            cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (m.id_fondo,))
-            fila_fondo = cur.fetchone()
-            cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{m.id_fondo}")
-            monto = abs(m.importe)
-            if m.importe < 0:
-                lineas = [(m.cod_cuenta, monto, 0, m.detalle), (cuenta_fondo, 0, monto, m.detalle)]
-            else:
-                lineas = [(cuenta_fondo, monto, 0, m.detalle), (m.cod_cuenta, 0, monto, m.detalle)]
-            _agregar_lineas_asiento(cur, id_asiento, lineas)
-            cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (fecha.month, fecha, m.id_titular, m.cod_cuenta, m.detalle, m.importe, m.id_fondo, confirmado, id_asiento))
-            _set_reversion(cur, id_asiento, [
-                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
-            ])
+            id_asiento = _crear_movimiento_manual(cur, m.fecha, m.id_titular, m.cod_cuenta, m.id_fondo, m.detalle, m.importe)
         conn.commit()
         return {"ok": True, "id_asiento": id_asiento}
+    finally:
+        conn.close()
+
+class FilaCargaMasivaIn(BaseModel):
+    fecha: str
+    id_titular: int
+    id_cuenta: int
+    id_fondo: int
+    detalle: str = ""
+    importe: float
+
+@app.post("/movimientos/carga_masiva")
+def carga_masiva_movimientos(filas: List[FilaCargaMasivaIn]):
+    """Carga varias filas de Movimiento Manual de una sola vez (pegadas desde Excel) — cada
+    una crea su propio asiento, igual que si se hubiera cargado una por una en el modal.
+    Devuelve el resultado fila por fila, para que la persona vea cuáles se cargaron bien y
+    cuáles no (ej. un ID que no existe), sin que un error trabe a las demás."""
+    conn = get_conn()
+    resultados = []
+    try:
+        for i, f in enumerate(filas):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT nombre FROM plan_de_cuentas WHERE id = %s", (f.id_cuenta,))
+                    fila_cuenta = cur.fetchone()
+                    if not fila_cuenta:
+                        resultados.append({"fila": i + 1, "ok": False, "error": f"No existe la cuenta ID {f.id_cuenta}"})
+                        conn.rollback()
+                        continue
+                    cur.execute("SELECT id FROM titulares WHERE id = %s", (str(f.id_titular),))
+                    if not cur.fetchone():
+                        resultados.append({"fila": i + 1, "ok": False, "error": f"No existe el titular ID {f.id_titular}"})
+                        conn.rollback()
+                        continue
+                    cur.execute("SELECT id FROM fondos WHERE id = %s", (f.id_fondo,))
+                    if not cur.fetchone():
+                        resultados.append({"fila": i + 1, "ok": False, "error": f"No existe el fondo ID {f.id_fondo}"})
+                        conn.rollback()
+                        continue
+                    id_asiento = _crear_movimiento_manual(cur, f.fecha, f.id_titular, fila_cuenta["nombre"], f.id_fondo, f.detalle, f.importe)
+                conn.commit()
+                resultados.append({"fila": i + 1, "ok": True, "id_asiento": id_asiento})
+            except Exception as e:
+                conn.rollback()
+                resultados.append({"fila": i + 1, "ok": False, "error": str(e)[:200]})
+        return resultados
     finally:
         conn.close()
 
