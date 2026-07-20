@@ -395,25 +395,58 @@ def reprogramar_vencimiento(id: int, body: ReprogramarIn):
     finally:
         conn.close()
 
-def _crear_movimiento_manual(cur, fecha_str, id_titular, cod_cuenta, id_fondo, detalle, importe):
+def _crear_movimiento_manual(cur, fecha_str, id_titular, cod_cuenta, id_fondo, detalle, importe,
+                              cantidad_moneda=None, cotizacion_pactada=None, cotizacion_real=None):
     """El corazón de Movimiento Manual — separado para poder reusarse desde la carga masiva,
-    sin duplicar la lógica del asiento."""
+    sin duplicar la lógica del asiento.
+
+    Si viene 'cantidad_moneda' + 'cotizacion_pactada' + 'cotizacion_real' (Fondo en USD, con
+    una cotización negociada distinta de la real): el Fondo se valúa SIEMPRE a la cotización
+    real (la de arriba) — la diferencia contra la cotización pactada en esta operación
+    puntual va a una tercera línea, Ganancia o Pérdida por Tenencia. El 'importe' que llega
+    en ese caso ya no se usa para las líneas (se recalcula todo a partir de la cantidad de
+    moneda), solo queda como referencia de signo (ingreso/egreso) y para el cashflow."""
     fecha = date.fromisoformat(fecha_str)
     confirmado = fecha <= date.today()
     id_asiento = _crear_asiento(cur, "MOVIMIENTO_MANUAL", detalle, fecha)
     cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (id_fondo,))
     fila_fondo = cur.fetchone()
     cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{id_fondo}")
-    monto = abs(importe)
-    if importe < 0:
-        lineas = [(cod_cuenta, monto, 0, detalle), (cuenta_fondo, 0, monto, detalle)]
+
+    hay_conversion = cantidad_moneda is not None and cotizacion_pactada is not None and cotizacion_real is not None
+    if hay_conversion:
+        cantidad = abs(cantidad_moneda)
+        monto_real = round(cantidad * cotizacion_real, 2)
+        monto_pactado = round(cantidad * cotizacion_pactada, 2)
+        if importe < 0:
+            # Egreso: se cancela una deuda/gasto a la cotización pactada (Debe), sale el
+            # Fondo a la cotización real (Haber).
+            lineas = [(cod_cuenta, monto_pactado, 0, detalle), (cuenta_fondo, 0, monto_real, detalle)]
+            diferencia = monto_pactado - monto_real
+        else:
+            # Ingreso: entra el Fondo a la cotización real (Debe), se reconoce el
+            # aporte/crédito a la cotización pactada (Haber).
+            lineas = [(cuenta_fondo, monto_real, 0, detalle), (cod_cuenta, 0, monto_pactado, detalle)]
+            diferencia = monto_real - monto_pactado
+        if diferencia > 0.01:
+            lineas.append(("Ganancia por Tenencia", 0, round(diferencia, 2), detalle))
+        elif diferencia < -0.01:
+            lineas.append(("Pérdida por Tenencia", round(abs(diferencia), 2), 0, detalle))
+        monto_cashflow = monto_real if importe >= 0 else -monto_real
     else:
-        lineas = [(cuenta_fondo, monto, 0, detalle), (cod_cuenta, 0, monto, detalle)]
+        monto = abs(importe)
+        if importe < 0:
+            lineas = [(cod_cuenta, monto, 0, detalle), (cuenta_fondo, 0, monto, detalle)]
+        else:
+            lineas = [(cuenta_fondo, monto, 0, detalle), (cod_cuenta, 0, monto, detalle)]
+        monto_cashflow = importe
+
     _agregar_lineas_asiento(cur, id_asiento, lineas)
     cur.execute("""
-        INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (fecha.month, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento))
+        INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento, cantidad_moneda)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (fecha.month, fecha, id_titular, cod_cuenta, detalle, monto_cashflow, id_fondo, confirmado, id_asiento,
+          cantidad_moneda))
     _set_reversion(cur, id_asiento, [
         {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
     ])
@@ -426,13 +459,17 @@ class MovimientoIn(BaseModel):
     cod_cuenta: str
     detalle: str
     importe: float
+    cantidad_moneda: Optional[float] = None   # cantidad real de USD (o la moneda que sea)
+    cotizacion_pactada: Optional[float] = None  # la cotización negociada en esta operación puntual
+    cotizacion_real: Optional[float] = None     # la cotización real de hoy (la de arriba)
 
 @app.post("/cashflow")
 def crear_movimiento(m: MovimientoIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            id_asiento = _crear_movimiento_manual(cur, m.fecha, m.id_titular, m.cod_cuenta, m.id_fondo, m.detalle, m.importe)
+            id_asiento = _crear_movimiento_manual(cur, m.fecha, m.id_titular, m.cod_cuenta, m.id_fondo, m.detalle, m.importe,
+                                                   m.cantidad_moneda, m.cotizacion_pactada, m.cotizacion_real)
         conn.commit()
         return {"ok": True, "id_asiento": id_asiento}
     finally:
@@ -2848,6 +2885,102 @@ def guardar_manual(m: ManualIn):
     finally:
         conn.close()
 
+@app.get("/fondos_usd_saldos")
+def get_fondos_usd_saldos():
+    """Para cada Fondo en USD: cuántos dólares reales hay (sumando cashflow confirmado +
+    saldos iniciales), y cuánto vale eso en pesos según lo que Balance ya tiene registrado
+    hoy para esa cuenta — la diferencia contra la cotización de hoy es lo que el botón de
+    Ajuste por Tenencia va a poner al día."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, nombre, cuenta_patrimonial FROM fondos WHERE moneda = 'USD' AND activo = true")
+            fondos_usd = cur.fetchall()
+            resultado = []
+            for f in fondos_usd:
+                cur.execute("""
+                    SELECT COALESCE(SUM(cantidad_moneda), 0) AS total FROM cashflow
+                    WHERE id_fondo = %s AND confirmado = true
+                    AND (id_asiento IS NULL OR id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+                """, (f["id"],))
+                cantidad = float(cur.fetchone()["total"])
+                cur.execute("""
+                    SELECT COALESCE(SUM(cantidad_moneda), 0) AS total FROM saldos_iniciales
+                    WHERE cuenta_patrimonial = %s
+                    AND (id_asiento IS NULL OR id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+                """, (f["cuenta_patrimonial"],))
+                cantidad += float(cur.fetchone()["total"])
+                cur.execute("""
+                    SELECT COALESCE(SUM(debe - haber), 0) AS total FROM asiento_lineas al
+                    JOIN asientos a ON a.id = al.id_asiento
+                    WHERE al.cuenta_patrimonial = %s AND a.anulado = false
+                """, (f["cuenta_patrimonial"],))
+                pesos_registrados = float(cur.fetchone()["total"])
+                resultado.append({
+                    "id_fondo": f["id"], "nombre": f["nombre"], "cuenta_patrimonial": f["cuenta_patrimonial"],
+                    "cantidad_moneda": cantidad, "pesos_registrados": pesos_registrados,
+                })
+            return resultado
+    finally:
+        conn.close()
+
+class AjusteTenenciaIn(BaseModel):
+    id_fondo: int
+    cotizacion_actual: float
+    fecha: str
+
+@app.post("/ajuste_tenencia")
+def crear_ajuste_tenencia(a: AjusteTenenciaIn):
+    """Botón deliberado (no automático) — revalúa un Fondo en USD a la cotización de hoy,
+    comparando contra lo que Balance ya tiene registrado. La diferencia es Ganancia o
+    Pérdida por Tenencia. No mueve ni un dólar real — es un asiento puro de revaluación."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT nombre, cuenta_patrimonial FROM fondos WHERE id = %s", (a.id_fondo,))
+            fila_fondo = cur.fetchone()
+            if not fila_fondo:
+                return {"ok": False, "error": "Fondo no encontrado"}
+            cuenta_fondo = fila_fondo["cuenta_patrimonial"] or fila_fondo["nombre"]
+
+            cur.execute("""
+                SELECT COALESCE(SUM(cantidad_moneda), 0) AS total FROM cashflow
+                WHERE id_fondo = %s AND confirmado = true
+                AND (id_asiento IS NULL OR id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+            """, (a.id_fondo,))
+            cantidad = float(cur.fetchone()["total"])
+            cur.execute("""
+                SELECT COALESCE(SUM(cantidad_moneda), 0) AS total FROM saldos_iniciales
+                WHERE cuenta_patrimonial = %s
+                AND (id_asiento IS NULL OR id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+            """, (cuenta_fondo,))
+            cantidad += float(cur.fetchone()["total"])
+
+            cur.execute("""
+                SELECT COALESCE(SUM(debe - haber), 0) AS total FROM asiento_lineas al
+                JOIN asientos a2 ON a2.id = al.id_asiento
+                WHERE al.cuenta_patrimonial = %s AND a2.anulado = false
+            """, (cuenta_fondo,))
+            pesos_registrados = float(cur.fetchone()["total"])
+
+            pesos_hoy = round(cantidad * a.cotizacion_actual, 2)
+            diferencia = round(pesos_hoy - pesos_registrados, 2)
+            if abs(diferencia) < 0.5:
+                return {"ok": True, "sin_diferencia": True}
+
+            fecha = date.fromisoformat(a.fecha)
+            detalle = f"Ajuste por tenencia — {fila_fondo['nombre']} a ${a.cotizacion_actual}"
+            id_asiento = _crear_asiento(cur, "AJUSTE_TENENCIA", detalle, fecha)
+            if diferencia > 0:
+                lineas = [(cuenta_fondo, diferencia, 0, detalle), ("Ganancia por Tenencia", 0, diferencia, detalle)]
+            else:
+                lineas = [("Pérdida por Tenencia", abs(diferencia), 0, detalle), (cuenta_fondo, 0, abs(diferencia), detalle)]
+            _agregar_lineas_asiento(cur, id_asiento, lineas)
+        conn.commit()
+        return {"ok": True, "id_asiento": id_asiento, "diferencia": diferencia, "cantidad_moneda": cantidad, "pesos_hoy": pesos_hoy}
+    finally:
+        conn.close()
+
 @app.get("/proyeccion_alerta")
 def get_proyeccion_alerta():
     conn = get_conn()
@@ -3330,6 +3463,7 @@ class SaldoInicialIn(BaseModel):
     cuenta_patrimonial: str
     importe: float
     descripcion: Optional[str] = None
+    cantidad_moneda: Optional[float] = None
 
 
 # ==========================================
@@ -3622,9 +3756,9 @@ def crear_saldo_inicial(s: SaldoInicialIn):
                     id_asiento = _crear_asiento(cur, "APERTURA", f"Apertura: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
                 _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
                 cur.execute("""
-                    UPDATE saldos_iniciales SET fecha=%s, importe=%s, descripcion=%s, id_asiento=%s
+                    UPDATE saldos_iniciales SET fecha=%s, importe=%s, descripcion=%s, id_asiento=%s, cantidad_moneda=%s
                     WHERE id = %s
-                """, (s.fecha, s.importe, s.descripcion, id_asiento, existente["id"]))
+                """, (s.fecha, s.importe, s.descripcion, id_asiento, s.cantidad_moneda, existente["id"]))
                 _set_reversion(cur, id_asiento, [
                     {"tabla": "saldos_iniciales", "where_columna": "id", "where_valor": existente["id"], "tipo": "DELETE"},
                 ])
@@ -3634,9 +3768,9 @@ def crear_saldo_inicial(s: SaldoInicialIn):
             id_asiento = _crear_asiento(cur, "APERTURA", f"Apertura: {s.cuenta_patrimonial}", date.fromisoformat(s.fecha))
             _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
             cur.execute("""
-                INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion, id_asiento)
-                VALUES (%s, %s, %s, %s, %s) RETURNING id
-            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento))
+                INSERT INTO saldos_iniciales (fecha, cuenta_patrimonial, importe, descripcion, id_asiento, cantidad_moneda)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento, s.cantidad_moneda))
             id_nuevo = cur.fetchone()["id"]
             _set_reversion(cur, id_asiento, [
                 {"tabla": "saldos_iniciales", "where_columna": "id", "where_valor": id_nuevo, "tipo": "DELETE"},
@@ -3661,9 +3795,9 @@ def actualizar_saldo_inicial(id: int, s: SaldoInicialIn):
                 cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = %s", (id_asiento,))
             _agregar_lineas_asiento(cur, id_asiento, _lineas_apertura(cur, s.cuenta_patrimonial, s.importe))
             cur.execute("""
-                UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s, id_asiento=%s
+                UPDATE saldos_iniciales SET fecha=%s, cuenta_patrimonial=%s, importe=%s, descripcion=%s, id_asiento=%s, cantidad_moneda=%s
                 WHERE id=%s
-            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento, id))
+            """, (s.fecha, s.cuenta_patrimonial, s.importe, s.descripcion, id_asiento, s.cantidad_moneda, id))
             _set_reversion(cur, id_asiento, [
                 {"tabla": "saldos_iniciales", "where_columna": "id", "where_valor": id, "tipo": "DELETE"},
             ])
