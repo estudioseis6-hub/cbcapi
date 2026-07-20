@@ -799,9 +799,9 @@ def get_plan_cuentas():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc, nombre, signo, fondo, dd, activo, cod_cbc, moneda
+                SELECT id, niv1, niv2, niv3, niv4, niv5, niv6, niv1_desc, niv2_desc, niv3_desc, niv4_desc, niv5_desc, niv6_desc, nombre, signo, fondo, dd, activo, cod_cbc, moneda, id_codigo
                 FROM plan_de_cuentas
-                ORDER BY niv1,niv2,niv3,niv4,niv5
+                ORDER BY niv1,niv2,niv3,niv4,niv5,niv6
             """)
             return cur.fetchall()
     finally:
@@ -836,7 +836,10 @@ class CuentaIn(BaseModel):
     niv3_desc: Optional[str] = None
     niv4: Optional[int] = 1
     niv4_desc: Optional[str] = None
-    niv5: Optional[int] = None
+    niv5: Optional[int] = 1
+    niv5_desc: Optional[str] = None
+    niv6: Optional[int] = None
+    niv6_desc: Optional[str] = None
     nombre: str
     cod_cbc: Optional[str] = None
     signo: Optional[str] = None
@@ -850,24 +853,25 @@ def crear_cuenta(c: CuentaIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            if c.niv5 is None:
+            if c.niv6 is None:
                 cur.execute("""
-                    SELECT COALESCE(MAX(niv5), 0) + 1 AS siguiente
+                    SELECT COALESCE(MAX(niv6), 0) + 1 AS siguiente
                     FROM plan_de_cuentas
-                    WHERE niv1=%s AND niv2=%s AND niv3=%s AND niv4=%s
-                """, (c.niv1, c.niv2, c.niv3, c.niv4))
-                niv5 = cur.fetchone()["siguiente"]
+                    WHERE niv1=%s AND niv2=%s AND niv3=%s AND niv4=%s AND niv5=%s
+                """, (c.niv1, c.niv2, c.niv3, c.niv4, c.niv5))
+                niv6 = cur.fetchone()["siguiente"]
             else:
-                niv5 = c.niv5
+                niv6 = c.niv6
+            id_codigo = f"{c.niv1}.{c.niv2}.{c.niv3}.{c.niv4}.{c.niv5}.{niv6}."
             cur.execute("""
                 INSERT INTO plan_de_cuentas
-                    (niv1, niv2, niv3, niv4, niv5, niv1_desc, niv2_desc, niv3_desc, niv4_desc,
-                     nombre, cod_cbc, signo, fondo, moneda, dd, activo)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (c.niv1, c.niv2, c.niv3, c.niv4, niv5,
-                  c.niv1_desc, c.niv2_desc, c.niv3_desc, c.niv4_desc,
+                    (niv1, niv2, niv3, niv4, niv5, niv6, niv1_desc, niv2_desc, niv3_desc, niv4_desc, niv5_desc, niv6_desc,
+                     nombre, cod_cbc, signo, fondo, moneda, dd, activo, id_codigo)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (c.niv1, c.niv2, c.niv3, c.niv4, c.niv5, niv6,
+                  c.niv1_desc, c.niv2_desc, c.niv3_desc, c.niv4_desc, c.niv5_desc, c.niv6_desc or c.nombre,
                   c.nombre, c.cod_cbc, c.signo, c.fondo or None,
-                  c.moneda, c.dd, c.activo))
+                  c.moneda, c.dd, c.activo, id_codigo))
         conn.commit()
         return {"ok": True}
     finally:
@@ -878,17 +882,21 @@ def actualizar_cuenta(id: int, c: CuentaIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            niv6 = c.niv6 if c.niv6 is not None else 1
+            id_codigo = f"{c.niv1}.{c.niv2}.{c.niv3}.{c.niv4}.{c.niv5}.{niv6}."
             cur.execute("""
                 UPDATE plan_de_cuentas
                 SET niv1=%s, niv1_desc=%s, niv2=%s, niv2_desc=%s,
                     niv3=%s, niv3_desc=%s, niv4=%s, niv4_desc=%s,
+                    niv5=%s, niv5_desc=%s, niv6=%s, niv6_desc=%s,
                     nombre=%s, cod_cbc=%s, signo=%s, fondo=%s,
-                    moneda=%s, dd=%s, activo=%s
+                    moneda=%s, dd=%s, activo=%s, id_codigo=%s
                 WHERE id=%s
             """, (c.niv1, c.niv1_desc, c.niv2, c.niv2_desc,
                   c.niv3, c.niv3_desc, c.niv4, c.niv4_desc,
+                  c.niv5, c.niv5_desc, niv6, c.niv6_desc or c.nombre,
                   c.nombre, c.cod_cbc, c.signo, c.fondo or None,
-                  c.moneda, c.dd, c.activo, id))
+                  c.moneda, c.dd, c.activo, id_codigo, id))
         conn.commit()
         return {"ok": True}
     finally:
