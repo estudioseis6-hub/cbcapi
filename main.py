@@ -336,7 +336,7 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
                     if cuenta_fondo:
                         nuevo_asiento = _crear_asiento(cur, "CHEQUE_APERTURA_DEBITO", f"Débito de cheque apertura #{cheque['numero'] or ''}", fecha)
                         _agregar_lineas_asiento(cur, nuevo_asiento, [
-                            ("Valores Emitidos — Cheques Pendientes", cheque["importe"], 0, "Débito de cheque"),
+                            (_cuenta(cur, "VALORES_EMITIDOS"), cheque["importe"], 0, "Débito de cheque"),
                             (cuenta_fondo, 0, cheque["importe"], "Débito de cheque"),
                         ])
                         cur.execute("UPDATE cheques_apertura SET id_asiento_debito = %s WHERE id = %s", (nuevo_asiento, row["id_cheque_apertura"]))
@@ -364,7 +364,7 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
                 if cuenta_fondo and importe_echeq:
                     nuevo_asiento = _crear_asiento(cur, "PAGO_ECHEQ_DEBITO", "Débito de ECheq emitido", fecha)
                     _agregar_lineas_asiento(cur, nuevo_asiento, [
-                        ("Valores Emitidos — Cheques Pendientes", importe_echeq, 0, "Débito de ECheq"),
+                        (_cuenta(cur, "VALORES_EMITIDOS"), importe_echeq, 0, "Débito de ECheq"),
                         (cuenta_fondo, 0, importe_echeq, "Débito de ECheq"),
                     ])
                     cur.execute("UPDATE cheques_emitidos SET id_asiento_debito = %s WHERE id_cashflow = %s", (nuevo_asiento, id))
@@ -429,9 +429,9 @@ def _crear_movimiento_manual(cur, fecha_str, id_titular, cod_cuenta, id_fondo, d
             lineas = [(cuenta_fondo, monto_real, 0, detalle), (cod_cuenta, 0, monto_pactado, detalle)]
             diferencia = monto_real - monto_pactado
         if diferencia > 0.01:
-            lineas.append(("Ganancia por Tenencia", 0, round(diferencia, 2), detalle))
+            lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), 0, round(diferencia, 2), detalle))
         elif diferencia < -0.01:
-            lineas.append(("Pérdida por Tenencia", round(abs(diferencia), 2), 0, detalle))
+            lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), round(abs(diferencia), 2), 0, detalle))
         monto_cashflow = monto_real if importe >= 0 else -monto_real
     else:
         monto = abs(importe)
@@ -547,12 +547,12 @@ def crear_acreditacion_tarjetas(a: AcreditacionTarjetasIn):
             # Entra plata al banco (Debe) / se cancela el crédito pendiente (Haber).
             _agregar_lineas_asiento(cur, id_asiento, [
                 (cuenta_fondo, monto, 0, detalle),
-                ("Tarj. Credit. Pend. Acreditacion", 0, monto, detalle),
+                (_cuenta(cur, "TARJETAS_PEND_ACREDITACION"), 0, monto, detalle),
             ])
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (fecha.month, fecha, id_titular_generico, "Tarj. Credit. Pend. Acreditacion", detalle, monto, a.id_fondo, confirmado, id_asiento))
+            """, (fecha.month, fecha, id_titular_generico, _cuenta(cur, "TARJETAS_PEND_ACREDITACION"), detalle, monto, a.id_fondo, confirmado, id_asiento))
             _set_reversion(cur, id_asiento, [
                 {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
             ])
@@ -760,13 +760,13 @@ def crear_comprobante(c: ComprobanteIn):
                 lineas_asiento.append((cuenta_gasto, monto_gasto, 0, c.descripcion))
             monto_iva = (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
             if monto_iva:
-                lineas_asiento.append(("IVA Crédito Fiscal", monto_iva, 0, c.descripcion))
+                lineas_asiento.append((_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, 0, c.descripcion))
             if c.perc_iva:
-                lineas_asiento.append(("Percepción IVA a Cuenta", c.perc_iva, 0, c.descripcion))
+                lineas_asiento.append((_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, 0, c.descripcion))
             if c.perc_iibb:
-                lineas_asiento.append(("Percepción IIBB a Cuenta", c.perc_iibb, 0, c.descripcion))
+                lineas_asiento.append((_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, 0, c.descripcion))
             if c.perc_otras:
-                lineas_asiento.append(("Otras Percepciones a Cuenta", c.perc_otras, 0, c.descripcion))
+                lineas_asiento.append((_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, 0, c.descripcion))
             if cuenta_pasivo and importe:
                 lineas_asiento.append((cuenta_pasivo, 0, importe, c.descripcion))
 
@@ -1063,7 +1063,7 @@ def registrar_pago_echeq(p: PagoECheqIn):
             id_asiento = _crear_asiento(cur, "PAGO_ECHEQ", p.detalle or f"Cheque emitido #{p.nro_cheque}", fecha_emision)
             _agregar_lineas_asiento(cur, id_asiento, [
                 (p.cod_cuenta, monto, 0, p.detalle),
-                ("Valores Emitidos — Cheques Pendientes", 0, monto, p.detalle),
+                (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, p.detalle),
             ])
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
@@ -2972,9 +2972,9 @@ def crear_ajuste_tenencia(a: AjusteTenenciaIn):
             detalle = f"Ajuste por tenencia — {fila_fondo['nombre']} a ${a.cotizacion_actual}"
             id_asiento = _crear_asiento(cur, "AJUSTE_TENENCIA", detalle, fecha)
             if diferencia > 0:
-                lineas = [(cuenta_fondo, diferencia, 0, detalle), ("Ganancia por Tenencia", 0, diferencia, detalle)]
+                lineas = [(cuenta_fondo, diferencia, 0, detalle), (_cuenta(cur, "RESULTADO_TENENCIA_ME"), 0, diferencia, detalle)]
             else:
-                lineas = [("Pérdida por Tenencia", abs(diferencia), 0, detalle), (cuenta_fondo, 0, abs(diferencia), detalle)]
+                lineas = [(_cuenta(cur, "RESULTADO_TENENCIA_ME"), abs(diferencia), 0, detalle), (cuenta_fondo, 0, abs(diferencia), detalle)]
             _agregar_lineas_asiento(cur, id_asiento, lineas)
         conn.commit()
         return {"ok": True, "id_asiento": id_asiento, "diferencia": diferencia, "cantidad_moneda": cantidad, "pesos_hoy": pesos_hoy}
@@ -3191,6 +3191,16 @@ class AsientoIn(BaseModel):
 
 class AnularAsientoIn(BaseModel):
     motivo: Optional[str] = None
+
+def _cuenta(cur, codigo_interno):
+    """Resuelve el NOMBRE ACTUAL de una cuenta especial a partir de su código interno fijo —
+    nunca un texto hardcodeado. Si mañana se le cambia el nombre a esa cuenta en Plan de
+    Cuentas (Admin), esto sigue encontrándola igual, porque el código interno nunca cambia.
+    Si por algún motivo no está sembrada (código interno no configurado), devuelve el propio
+    código como texto — mejor un aviso visible en Balance que un asiento que se cae en silencio."""
+    cur.execute("SELECT nombre FROM plan_de_cuentas WHERE codigo_interno = %s", (codigo_interno,))
+    fila = cur.fetchone()
+    return fila["nombre"] if fila else f"[FALTA CONFIGURAR: {codigo_interno}]"
 
 def _crear_asiento(cur, tipo_origen, descripcion=None, fecha=None):
     """Crea un asiento y devuelve su id. Se usa DESDE ADENTRO de otros endpoints
@@ -3503,8 +3513,8 @@ def crear_cheque_apertura(c: ChequeAperturaIn):
             # cualquier saldo de apertura: contrapartida contra "Saldo Patrimonial de Apertura".
             id_asiento = _crear_asiento(cur, "CHEQUE_APERTURA", f"Cheque apertura #{c.numero or ''}", date.fromisoformat(c.fecha_emision))
             _agregar_lineas_asiento(cur, id_asiento, [
-                ("Saldo Patrimonial de Apertura", c.importe, 0, "Apertura de cheque"),
-                ("Valores Emitidos — Cheques Pendientes", 0, c.importe, "Apertura de cheque"),
+                (_cuenta(cur, "SALDO_APERTURA"), c.importe, 0, "Apertura de cheque"),
+                (_cuenta(cur, "VALORES_EMITIDOS"), 0, c.importe, "Apertura de cheque"),
             ])
             cur.execute("""
                 INSERT INTO cheques_apertura (fecha_emision, fecha_cheque, numero, id_titular, importe, descripcion, debitado, id_asiento)
@@ -3560,8 +3570,8 @@ def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
                 """, (date.fromisoformat(c.fecha_emision), f"Cheque apertura #{c.numero or ''}", id_asiento))
                 cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = %s", (id_asiento,))
                 _agregar_lineas_asiento(cur, id_asiento, [
-                    ("Saldo Patrimonial de Apertura", c.importe, 0, "Apertura de cheque"),
-                    ("Valores Emitidos — Cheques Pendientes", 0, c.importe, "Apertura de cheque"),
+                    (_cuenta(cur, "SALDO_APERTURA"), c.importe, 0, "Apertura de cheque"),
+                    (_cuenta(cur, "VALORES_EMITIDOS"), 0, c.importe, "Apertura de cheque"),
                 ])
 
             # Recién se marca Debitado (antes no lo estaba): la plata sale de verdad del banco.
@@ -3573,7 +3583,7 @@ def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
                 if cuenta_fondo:
                     nuevo_asiento = _crear_asiento(cur, "CHEQUE_APERTURA_DEBITO", f"Débito de cheque apertura #{c.numero or ''}", date.today())
                     _agregar_lineas_asiento(cur, nuevo_asiento, [
-                        ("Valores Emitidos — Cheques Pendientes", c.importe, 0, "Débito de cheque"),
+                        (_cuenta(cur, "VALORES_EMITIDOS"), c.importe, 0, "Débito de cheque"),
                         (cuenta_fondo, 0, c.importe, "Débito de cheque"),
                     ])
                     cur.execute("UPDATE cheques_apertura SET id_asiento_debito = %s WHERE id = %s", (nuevo_asiento, id))
@@ -3602,7 +3612,7 @@ def actualizar_cheque_apertura(id: int, c: ChequeAperturaIn):
                     if cuenta_fondo:
                         cur.execute("DELETE FROM asiento_lineas WHERE id_asiento = %s", (id_asiento_debito,))
                         _agregar_lineas_asiento(cur, id_asiento_debito, [
-                            ("Valores Emitidos — Cheques Pendientes", c.importe, 0, "Débito de cheque (editado)"),
+                            (_cuenta(cur, "VALORES_EMITIDOS"), c.importe, 0, "Débito de cheque (editado)"),
                             (cuenta_fondo, 0, c.importe, "Débito de cheque (editado)"),
                         ])
 
@@ -3730,12 +3740,12 @@ def _lineas_apertura(cur, cuenta_patrimonial, importe):
     if lado == "Pasivos":
         return [
             (cuenta_patrimonial, 0, monto, "Apertura"),
-            ("Saldo Patrimonial de Apertura", monto, 0, "Apertura"),
+            (_cuenta(cur, "SALDO_APERTURA"), monto, 0, "Apertura"),
         ]
     else:
         return [
             (cuenta_patrimonial, monto, 0, "Apertura"),
-            ("Saldo Patrimonial de Apertura", 0, monto, "Apertura"),
+            (_cuenta(cur, "SALDO_APERTURA"), 0, monto, "Apertura"),
         ]
 
 @app.post("/saldos_iniciales")
