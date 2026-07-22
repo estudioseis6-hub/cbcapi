@@ -3368,24 +3368,34 @@ def get_lineas_asiento(id: int):
         conn.close()
 
 @app.get("/balance_unificado")
-def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None):
+def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None,
+                           fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
     """Reemplaza /balance y /balance_patrimonial — una sola fuente de verdad (asiento_lineas)
     para TODO el Balance (Resultados y Patrimonial), sin mezclar cashflow/operaciones/fondos
     por separado. Cada cuenta del Plan de Cuentas trae:
-      - 'periodo': el movimiento SOLO del mes elegido (lo que importa para Resultados).
-      - 'acumulado': el saldo de siempre hasta el fin de ese mes (lo que importa para Patrimonial).
-    """
+      - 'periodo': el movimiento del mes elegido (o del rango, si se pasa fecha_desde/fecha_hasta)
+        — lo que importa para Resultados.
+      - 'acumulado': el saldo de siempre hasta el fin del período (lo que importa para Patrimonial).
+
+    Si se pasan 'fecha_desde' y 'fecha_hasta' (ej. un período largo como "toda la obra", varios
+    años sin sentido de ver mes a mes), esos mandan por sobre mes/año — 'periodo' suma TODO ese
+    rango junto, y 'acumulado' queda a la fecha de corte 'fecha_hasta' (el Balance Patrimonial
+    siempre es una foto a un momento, no un rango)."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             hoy = date.today()
-            anio = anio or hoy.year
-            if mes:
-                fecha_inicio_periodo = date(anio, mes, 1)
-                fecha_fin_periodo = date(anio + 1, 1, 1) - timedelta(days=1) if mes == 12 else date(anio, mes + 1, 1) - timedelta(days=1)
+            if fecha_desde and fecha_hasta:
+                fecha_inicio_periodo = date.fromisoformat(fecha_desde)
+                fecha_fin_periodo = date.fromisoformat(fecha_hasta)
             else:
-                fecha_inicio_periodo = date(anio, 1, 1)
-                fecha_fin_periodo = hoy
+                anio = anio or hoy.year
+                if mes:
+                    fecha_inicio_periodo = date(anio, mes, 1)
+                    fecha_fin_periodo = date(anio + 1, 1, 1) - timedelta(days=1) if mes == 12 else date(anio, mes + 1, 1) - timedelta(days=1)
+                else:
+                    fecha_inicio_periodo = date(anio, 1, 1)
+                    fecha_fin_periodo = hoy
 
             cur.execute("""
                 SELECT id, niv1, niv2, niv3, niv4, niv5, niv6, niv1_desc, niv2_desc, niv3_desc, niv4_desc, niv6_desc, nombre, id_codigo, signo
