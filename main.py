@@ -610,6 +610,70 @@ def crear_transferencia(t: TransferenciaIn):
     finally:
         conn.close()
 
+class CompraVentaMonedaIn(BaseModel):
+    fecha: str
+    id_fondo_origen: int   # sale
+    importe_origen: float  # en la moneda propia de ese Fondo, siempre positivo
+    id_fondo_destino: int  # entra
+    importe_destino: float # en la moneda propia de ese Fondo, siempre positivo
+    cotizacion_real: float # la cotización de hoy (la de arriba) — se usa para el lado en USD
+    detalle: str = ""
+
+@app.post("/compra_venta_moneda")
+def crear_compra_venta_moneda(t: CompraVentaMonedaIn):
+    """Compra/venta entre dos Fondos de distinta moneda (ej. Efectivo Pesos → Efectivo Dólares).
+    El lado en pesos se valúa a su valor nominal; el lado en USD siempre a la cotización real de
+    hoy — la diferencia contra lo efectivamente pagado/cobrado es Ganancia o Pérdida por
+    Tenencia, mismo criterio que ya se usa en Movimiento Manual y en el Ajuste por Tenencia."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha = date.fromisoformat(t.fecha)
+            confirmado = fecha <= date.today()
+            id_transf = str(uuid.uuid4())
+            cur.execute("SELECT id, nombre, moneda, cuenta_patrimonial FROM fondos WHERE id IN (%s, %s)", (t.id_fondo_origen, t.id_fondo_destino))
+            filas_fondo = {r["id"]: r for r in cur.fetchall()}
+            f_origen = filas_fondo.get(t.id_fondo_origen, {})
+            f_destino = filas_fondo.get(t.id_fondo_destino, {})
+            nombre_origen = f_origen.get("nombre", f"Fondo #{t.id_fondo_origen}")
+            nombre_destino = f_destino.get("nombre", f"Fondo #{t.id_fondo_destino}")
+            cuenta_origen = f_origen.get("cuenta_patrimonial") or nombre_origen
+            cuenta_destino = f_destino.get("cuenta_patrimonial") or nombre_destino
+
+            monto_origen_pesos = round(abs(t.importe_origen) * t.cotizacion_real, 2) if f_origen.get("moneda") == "USD" else round(abs(t.importe_origen), 2)
+            monto_destino_pesos = round(abs(t.importe_destino) * t.cotizacion_real, 2) if f_destino.get("moneda") == "USD" else round(abs(t.importe_destino), 2)
+
+            detalle = t.detalle or f"Compra/venta moneda: {nombre_origen} → {nombre_destino}"
+            id_asiento = _crear_asiento(cur, "COMPRA_VENTA_MONEDA", detalle, fecha)
+            lineas = [
+                (cuenta_destino, monto_destino_pesos, 0, f"Ingresa a {nombre_destino}"),
+                (cuenta_origen, 0, monto_origen_pesos, f"Sale de {nombre_origen}"),
+            ]
+            diferencia = round(monto_destino_pesos - monto_origen_pesos, 2)
+            if diferencia > 0.01:
+                lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), 0, diferencia, detalle))
+            elif diferencia < -0.01:
+                lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), abs(diferencia), 0, detalle))
+            _agregar_lineas_asiento(cur, id_asiento, lineas)
+
+            cantidad_origen = -abs(t.importe_origen) if f_origen.get("moneda") == "USD" else None
+            cantidad_destino = abs(t.importe_destino) if f_destino.get("moneda") == "USD" else None
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia, id_asiento, cantidad_moneda)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, 717, "Compra/Venta Moneda", detalle, -monto_origen_pesos, t.id_fondo_origen, confirmado, id_transf, id_asiento, cantidad_origen))
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_transferencia, id_asiento, cantidad_moneda)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (fecha.month, fecha, 716, "Compra/Venta Moneda", detalle, monto_destino_pesos, t.id_fondo_destino, confirmado, id_transf, id_asiento, cantidad_destino))
+            _set_reversion(cur, id_asiento, [
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ])
+        conn.commit()
+        return {"ok": True, "id_transferencia": id_transf, "id_asiento": id_asiento, "diferencia": diferencia}
+    finally:
+        conn.close()
+
 class ECheqIn(BaseModel):
     fecha_emision: str
     fecha_vencimiento: str
