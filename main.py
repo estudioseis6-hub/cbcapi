@@ -59,6 +59,7 @@ def get_fondos():
             cur.execute("""
                 SELECT f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema,
                        COALESCE(si.importe, 0) AS saldo_inicial,
+                       COALESCE(si.cantidad_moneda, 0) AS cantidad_inicial,
                        f.slot, f.abrev, f.grupo,
                        COALESCE(SUM(CASE WHEN c.confirmado = true AND c.fecha <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS movimientos,
                        COALESCE(SUM(CASE WHEN c.fecha > (CURRENT_TIMESTAMP AT TIME ZONE 'America/Argentina/Buenos_Aires')::date THEN c.importe ELSE 0 END), 0) AS proyectado
@@ -67,7 +68,7 @@ def get_fondos():
                 LEFT JOIN saldos_iniciales si ON si.cuenta_patrimonial = f.cuenta_patrimonial
                     AND si.fecha = %s
                 WHERE f.slot IS NOT NULL
-                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, si.importe, f.slot, f.abrev, f.grupo
+                GROUP BY f.id, f.nombre, f.tipo, f.moneda, f.activo, f.es_sistema, si.importe, si.cantidad_moneda, f.slot, f.abrev, f.grupo
                 ORDER BY f.orden
             """, (fecha_corte,))
             return cur.fetchall()
