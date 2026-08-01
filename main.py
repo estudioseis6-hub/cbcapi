@@ -483,6 +483,9 @@ class FilaCargaMasivaIn(BaseModel):
     id_fondo: int
     detalle: str = ""
     importe: float
+    cantidad_moneda: Optional[float] = None
+    cotizacion_pactada: Optional[float] = None
+    cotizacion_real: Optional[float] = None
 
 @app.post("/movimientos/carga_masiva")
 def carga_masiva_movimientos(filas: List[FilaCargaMasivaIn]):
@@ -512,7 +515,8 @@ def carga_masiva_movimientos(filas: List[FilaCargaMasivaIn]):
                         resultados.append({"fila": i + 1, "ok": False, "error": f"No existe el fondo ID {f.id_fondo}"})
                         conn.rollback()
                         continue
-                    id_asiento = _crear_movimiento_manual(cur, f.fecha, f.id_titular, fila_cuenta["nombre"], f.id_fondo, f.detalle, f.importe)
+                    id_asiento = _crear_movimiento_manual(cur, f.fecha, f.id_titular, fila_cuenta["nombre"], f.id_fondo, f.detalle, f.importe,
+                                                           f.cantidad_moneda, f.cotizacion_pactada, f.cotizacion_real)
                 conn.commit()
                 resultados.append({"fila": i + 1, "ok": True, "id_asiento": id_asiento})
             except Exception as e:
