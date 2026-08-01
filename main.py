@@ -3372,6 +3372,51 @@ def get_lineas_asiento(id: int):
     finally:
         conn.close()
 
+@app.get("/mayor_por_fondo")
+def get_mayor_por_fondo(mes: Optional[int] = None, anio: Optional[int] = None,
+                        fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
+    """Planilla de Ingresos y Egresos agrupada por Titular + Cuenta contable, con el total de
+    cada uno repartido en las mismas 4 columnas de Fondo que ya se usan en Tesorería (EFVO $,
+    Cuentas $, EFVO USD, Cuentas USD) — las columnas en USD muestran la cantidad real de
+    dólares, no un equivalente en pesos (eso queda pendiente para más adelante, porque para
+    períodos históricos la cotización de hoy no sirve)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            hoy = date.today()
+            if fecha_desde and fecha_hasta:
+                d_inicio, d_fin = fecha_desde, fecha_hasta
+            elif mes:
+                anio = anio or hoy.year
+                d_inicio = date(anio, mes, 1).isoformat()
+                d_fin = (date(anio + 1, 1, 1) - timedelta(days=1)).isoformat() if mes == 12 else (date(anio, mes + 1, 1) - timedelta(days=1)).isoformat()
+            else:
+                anio = anio or hoy.year
+                d_inicio = date(anio, 1, 1).isoformat()
+                d_fin = hoy.isoformat()
+
+            cur.execute("""
+                SELECT t.nombre AS titular, c.cod_cuenta AS cuenta,
+                    COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) AS efvo_ars,
+                    COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) AS cuentas_ars,
+                    COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) AS efvo_usd,
+                    COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) AS cuentas_usd
+                FROM cashflow c
+                LEFT JOIN titulares t ON t.id::text = c.id_titular::text
+                LEFT JOIN fondos f ON f.id = c.id_fondo
+                WHERE c.fecha BETWEEN %s AND %s
+                AND (c.id_asiento IS NULL OR c.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+                GROUP BY t.nombre, c.cod_cuenta
+                HAVING COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) != 0
+                    OR COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) != 0
+                    OR COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) != 0
+                    OR COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) != 0
+                ORDER BY t.nombre, c.cod_cuenta
+            """, (d_inicio, d_fin))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
 @app.get("/desglose_por_titular")
 def get_desglose_por_titular(cuenta: str, fecha_hasta: Optional[str] = None):
     """Para cuentas de PN Origen como 'Aportes de Capital Recibidos' o 'Distribución de
