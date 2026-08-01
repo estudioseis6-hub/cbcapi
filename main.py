@@ -3372,6 +3372,30 @@ def get_lineas_asiento(id: int):
     finally:
         conn.close()
 
+@app.get("/desglose_por_titular")
+def get_desglose_por_titular(cuenta: str, fecha_hasta: Optional[str] = None):
+    """Para cuentas de PN Origen como 'Aportes de Capital Recibidos' o 'Distribución de
+    Capital a Socios', que en Balance aparecen como un solo total — este endpoint trae el
+    detalle de cuánto puso/retiró cada Titular, sumando cashflow (que sí guarda el Titular de
+    cada movimiento, a diferencia de asiento_lineas que solo tiene la cuenta contable)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            fecha_tope = fecha_hasta or date.today().isoformat()
+            cur.execute("""
+                SELECT t.nombre AS titular, COALESCE(SUM(ABS(c.importe)), 0) AS total
+                FROM cashflow c
+                JOIN titulares t ON t.id::text = c.id_titular::text
+                WHERE c.cod_cuenta = %s AND c.fecha <= %s
+                AND (c.id_asiento IS NULL OR c.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
+                GROUP BY t.nombre
+                HAVING COALESCE(SUM(ABS(c.importe)), 0) != 0
+                ORDER BY total DESC
+            """, (cuenta, fecha_tope))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
 @app.get("/balance_unificado")
 def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None,
                            fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
