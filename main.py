@@ -3172,7 +3172,7 @@ def get_balance_patrimonial(mes: Optional[int] = None):
                     SELECT cuenta_patrimonial FROM titulares WHERE cuenta_patrimonial IS NOT NULL
                 )
                 AND al.cuenta_patrimonial IN (
-                    SELECT nombre FROM plan_de_cuentas WHERE niv1_desc = 'Patrimonial'
+                    SELECT nombre FROM plan_de_cuentas WHERE niv1 IN (2, 3)
                 )
                 GROUP BY al.cuenta_patrimonial
             """)
