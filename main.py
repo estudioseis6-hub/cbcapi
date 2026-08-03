@@ -975,7 +975,7 @@ def crear_cuenta(c: CuentaIn):
                      nombre, cod_cbc, signo, fondo, moneda, dd, activo, id_codigo)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (c.niv1, c.niv2, c.niv3, c.niv4, c.niv5, niv6,
-                  c.niv1_desc, c.niv2_desc, c.niv3_desc, c.niv4_desc, c.niv5_desc, c.niv6_desc or c.nombre,
+                  c.niv1_desc, c.niv2_desc, c.niv3_desc, c.niv4_desc, c.niv5_desc, c.nombre,
                   c.nombre, c.cod_cbc, c.signo, c.fondo or None,
                   c.moneda, c.dd, c.activo, id_codigo))
         conn.commit()
@@ -1000,7 +1000,7 @@ def actualizar_cuenta(id: int, c: CuentaIn):
                 WHERE id=%s
             """, (c.niv1, c.niv1_desc, c.niv2, c.niv2_desc,
                   c.niv3, c.niv3_desc, c.niv4, c.niv4_desc,
-                  c.niv5, c.niv5_desc, niv6, c.niv6_desc or c.nombre,
+                  c.niv5, c.niv5_desc, niv6, c.nombre,
                   c.nombre, c.cod_cbc, c.signo, c.fondo or None,
                   c.moneda, c.dd, c.activo, id_codigo, id))
         conn.commit()
