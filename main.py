@@ -789,122 +789,150 @@ class ComprobanteIn(BaseModel):
     perc_otras: Optional[float] = 0
     sin_factura: Optional[float] = 0
 
+def _crear_comprobante(cur, c: ComprobanteIn):
+    """El corazón de la carga de una factura/comprobante — separado para poder reusarse desde
+    la carga masiva, sin duplicar la lógica del asiento."""
+    fecha = date.fromisoformat(c.fecha)
+    fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
+    es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) > 0)
+    num_norm = _solo_digitos(c.numero_comprobante)
+    if num_norm:
+        cur.execute("""
+            SELECT id FROM operaciones
+            WHERE id_titular = %s
+              AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
+            LIMIT 1
+        """, (str(c.id_titular), num_norm))
+        existe = cur.fetchone()
+        if existe:
+            return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
+    importe = (
+        (c.subtotal or 0) + (c.exento or 0)
+        + (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
+        + (c.perc_iva or 0) + (c.perc_iibb or 0) + (c.perc_otras or 0)
+        + (c.sin_factura or 0)
+    )
+
+    # Buscamos las cuentas del Titular: cuenta_patrimonial (el Pasivo, va al Haber)
+    # y nivel4 (la cuenta de Gasto/Resultado, va al Debe) — nada de esto se tipea a mano
+    # en el formulario, ya está configurado una sola vez en Titulares.
+    cur.execute("SELECT cuenta_patrimonial, nivel4 FROM titulares WHERE id = %s", (str(c.id_titular),))
+    row_titular = cur.fetchone() or {}
+    cuenta_pasivo = row_titular.get("cuenta_patrimonial")
+    cuenta_gasto = row_titular.get("nivel4")
+
+    lineas_asiento = []
+    monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
+    if cuenta_gasto and monto_gasto:
+        lineas_asiento.append((cuenta_gasto, monto_gasto, 0, c.descripcion))
+    monto_iva = (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
+    if monto_iva:
+        lineas_asiento.append((_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, 0, c.descripcion))
+    if c.perc_iva:
+        lineas_asiento.append((_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, 0, c.descripcion))
+    if c.perc_iibb:
+        lineas_asiento.append((_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, 0, c.descripcion))
+    if c.perc_otras:
+        lineas_asiento.append((_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, 0, c.descripcion))
+    if cuenta_pasivo and importe:
+        lineas_asiento.append((cuenta_pasivo, 0, importe, c.descripcion))
+
+    id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}", fecha_compra)
+    if lineas_asiento:
+        _agregar_lineas_asiento(cur, id_asiento, lineas_asiento)
+
+    cur.execute("""
+        INSERT INTO operaciones
+            (fecha, fecha_compra, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes,
+             subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura, es_informal, id_asiento)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
+          c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal, id_asiento))
+    id_operacion = cur.fetchone()["id"]
+    id_fondo = c.id_fondo
+    if id_fondo:
+        cur.execute("SELECT tipo FROM fondos WHERE id = %s", (id_fondo,))
+        fondo_row = cur.fetchone()
+        if es_informal and fondo_row and fondo_row["tipo"] != "Efectivo":
+            return {"ok": False, "error_fondo_informal": True}
+    else:
+        if es_informal:
+            cur.execute("SELECT id FROM fondos WHERE tipo = 'Efectivo' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
+            r = cur.fetchone()
+            id_fondo = r["id"] if r else None
+        else:
+            cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
+            r = cur.fetchone()
+            id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
+            # Si el Titular tampoco tiene un Fondo propio configurado, se presume el
+            # default general de facturas formales (Configuración) — toda factura
+            # formal se asume pagada por Banco salvo que se indique lo contrario, y
+            # cuál Banco puntual queda a elección del usuario en Configuración.
+            if not id_fondo:
+                cur.execute("SELECT valor FROM configuracion WHERE clave = 'fondo_default_facturas'")
+                cfg = cur.fetchone()
+                if cfg and cfg["valor"]:
+                    id_fondo = int(cfg["valor"])
+    if not id_fondo:
+        return {"ok": False, "sin_fondo": True}
+    plazo = None
+    if not c.fecha_vencimiento:
+        cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
+        row = cur.fetchone()
+        if row and row["plazo_pago"] and row["plazo_pago"] > 0:
+            plazo = row["plazo_pago"]
+    if c.fecha_vencimiento:
+        fecha_vto = date.fromisoformat(c.fecha_vencimiento)
+        sin_plazo = False
+    elif plazo:
+        fecha_vto = fecha + timedelta(days=plazo)
+        sin_plazo = False
+    else:
+        fecha_vto = fecha + timedelta(days=30)
+        sin_plazo = True
+    cur.execute("""
+        INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
+    _set_reversion(cur, id_asiento, [
+        {"tabla": "cashflow", "where_columna": "id_operacion", "where_valor": id_operacion, "tipo": "DELETE"},
+        {"tabla": "operaciones", "where_columna": "id", "where_valor": id_operacion, "tipo": "DELETE"},
+    ])
+    return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal, "id_fondo_usado": id_fondo}
+
 @app.post("/operaciones")
 def crear_comprobante(c: ComprobanteIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            fecha = date.fromisoformat(c.fecha)
-            fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
-            es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) > 0)
-            num_norm = _solo_digitos(c.numero_comprobante)
-            if num_norm:
-                cur.execute("""
-                    SELECT id FROM operaciones
-                    WHERE id_titular = %s
-                      AND regexp_replace(COALESCE(numero_comprobante,''),'\\D','','g') = %s
-                    LIMIT 1
-                """, (str(c.id_titular), num_norm))
-                existe = cur.fetchone()
-                if existe:
-                    return {"ok": False, "duplicado": True, "id_existente": existe["id"]}
-            importe = (
-                (c.subtotal or 0) + (c.exento or 0)
-                + (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
-                + (c.perc_iva or 0) + (c.perc_iibb or 0) + (c.perc_otras or 0)
-                + (c.sin_factura or 0)
-            )
+            resultado = _crear_comprobante(cur, c)
+        conn.commit()
+        return resultado
+    finally:
+        conn.close()
 
-            # Buscamos las cuentas del Titular: cuenta_patrimonial (el Pasivo, va al Haber)
-            # y nivel4 (la cuenta de Gasto/Resultado, va al Debe) — nada de esto se tipea a mano
-            # en el formulario, ya está configurado una sola vez en Titulares.
-            cur.execute("SELECT cuenta_patrimonial, nivel4 FROM titulares WHERE id = %s", (str(c.id_titular),))
-            row_titular = cur.fetchone() or {}
-            cuenta_pasivo = row_titular.get("cuenta_patrimonial")
-            cuenta_gasto = row_titular.get("nivel4")
+class FilaCargaMasivaFacturaIn(ComprobanteIn):
+    pass
 
-            lineas_asiento = []
-            monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
-            if cuenta_gasto and monto_gasto:
-                lineas_asiento.append((cuenta_gasto, monto_gasto, 0, c.descripcion))
-            monto_iva = (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
-            if monto_iva:
-                lineas_asiento.append((_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, 0, c.descripcion))
-            if c.perc_iva:
-                lineas_asiento.append((_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, 0, c.descripcion))
-            if c.perc_iibb:
-                lineas_asiento.append((_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, 0, c.descripcion))
-            if c.perc_otras:
-                lineas_asiento.append((_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, 0, c.descripcion))
-            if cuenta_pasivo and importe:
-                lineas_asiento.append((cuenta_pasivo, 0, importe, c.descripcion))
-
-            id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}", fecha_compra)
-            if lineas_asiento:
-                _agregar_lineas_asiento(cur, id_asiento, lineas_asiento)
-
-            cur.execute("""
-                INSERT INTO operaciones
-                    (fecha, fecha_compra, id_titular, id_tipo_comprobante, numero_comprobante, descripcion, importe, mes,
-                     subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura, es_informal, id_asiento)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
-                  c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal, id_asiento))
-            id_operacion = cur.fetchone()["id"]
-            id_fondo = c.id_fondo
-            if id_fondo:
-                cur.execute("SELECT tipo FROM fondos WHERE id = %s", (id_fondo,))
-                fondo_row = cur.fetchone()
-                if es_informal and fondo_row and fondo_row["tipo"] != "Efectivo":
-                    conn.commit()
-                    return {"ok": False, "error_fondo_informal": True}
-            else:
-                if es_informal:
-                    cur.execute("SELECT id FROM fondos WHERE tipo = 'Efectivo' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
-                    r = cur.fetchone()
-                    id_fondo = r["id"] if r else None
-                else:
-                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
-                    r = cur.fetchone()
-                    id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
-                    # Si el Titular tampoco tiene un Fondo propio configurado, se presume el
-                    # default general de facturas formales (Configuración) — toda factura
-                    # formal se asume pagada por Banco salvo que se indique lo contrario, y
-                    # cuál Banco puntual queda a elección del usuario en Configuración.
-                    if not id_fondo:
-                        cur.execute("SELECT valor FROM configuracion WHERE clave = 'fondo_default_facturas'")
-                        cfg = cur.fetchone()
-                        if cfg and cfg["valor"]:
-                            id_fondo = int(cfg["valor"])
-            if not id_fondo:
+@app.post("/operaciones/carga_masiva")
+def carga_masiva_operaciones(filas: List[FilaCargaMasivaFacturaIn]):
+    """Carga varias facturas de una sola vez (pegadas desde Excel) — cada una pasa por la
+    misma lógica que la carga individual (duplicados, IVA, asiento, proyección en Tesorería),
+    y un error en una fila no traba a las demás."""
+    conn = get_conn()
+    resultados = []
+    try:
+        for i, c in enumerate(filas):
+            try:
+                with conn.cursor() as cur:
+                    resultado = _crear_comprobante(cur, c)
                 conn.commit()
-                return {"ok": False, "sin_fondo": True}
-            plazo = None
-            if not c.fecha_vencimiento:
-                cur.execute("SELECT plazo_pago FROM titulares WHERE id = %s", (str(c.id_titular),))
-                row = cur.fetchone()
-                if row and row["plazo_pago"] and row["plazo_pago"] > 0:
-                    plazo = row["plazo_pago"]
-            if c.fecha_vencimiento:
-                fecha_vto = date.fromisoformat(c.fecha_vencimiento)
-                sin_plazo = False
-            elif plazo:
-                fecha_vto = fecha + timedelta(days=plazo)
-                sin_plazo = False
-            else:
-                fecha_vto = fecha + timedelta(days=30)
-                sin_plazo = True
-            cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-            """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
-            _set_reversion(cur, id_asiento, [
-                {"tabla": "cashflow", "where_columna": "id_operacion", "where_valor": id_operacion, "tipo": "DELETE"},
-                {"tabla": "operaciones", "where_columna": "id", "where_valor": id_operacion, "tipo": "DELETE"},
-            ])
-            conn.commit()
-            return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal, "id_fondo_usado": id_fondo}
+                resultados.append({"fila": i + 1, **resultado})
+            except Exception as e:
+                conn.rollback()
+                resultados.append({"fila": i + 1, "ok": False, "error": str(e)[:200]})
+        return resultados
     finally:
         conn.close()
 
