@@ -868,6 +868,15 @@ def crear_comprobante(c: ComprobanteIn):
                     cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
                     r = cur.fetchone()
                     id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
+                    # Si el Titular tampoco tiene un Fondo propio configurado, se presume el
+                    # default general de facturas formales (Configuración) — toda factura
+                    # formal se asume pagada por Banco salvo que se indique lo contrario, y
+                    # cuál Banco puntual queda a elección del usuario en Configuración.
+                    if not id_fondo:
+                        cur.execute("SELECT valor FROM configuracion WHERE clave = 'fondo_default_facturas'")
+                        cfg = cur.fetchone()
+                        if cfg and cfg["valor"]:
+                            id_fondo = int(cfg["valor"])
             if not id_fondo:
                 conn.commit()
                 return {"ok": False, "sin_fondo": True}
@@ -895,7 +904,7 @@ def crear_comprobante(c: ComprobanteIn):
                 {"tabla": "operaciones", "where_columna": "id", "where_valor": id_operacion, "tipo": "DELETE"},
             ])
             conn.commit()
-            return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal}
+            return {"ok": True, "id_operacion": id_operacion, "proyectado": True, "fecha_vencimiento": str(fecha_vto), "sin_plazo": sin_plazo, "es_informal": es_informal, "id_fondo_usado": id_fondo}
     finally:
         conn.close()
 
@@ -1246,6 +1255,16 @@ def actualizar_operacion(id: int, o: OperacionUpdateIn):
                 UPDATE cashflow SET fecha=%s, mes=%s, importe=%s, id_fondo=%s, detalle=%s
                 WHERE id_operacion=%s AND confirmado=false
             """, (fecha_vto, fecha_vto.month, -abs(importe), o.id_fondo, o.descripcion, id))
+            if cur.rowcount == 0:
+                # No había fila de proyección todavía — pasa cuando la factura se creó sin
+                # ningún Fondo disponible (bloqueo "sin_fondo"), quedando la operación creada
+                # pero sin proyectar en Tesorería. Se crea acá, en vez de dejarla huérfana.
+                cur.execute("SELECT id_titular FROM operaciones WHERE id = %s", (id,))
+                id_titular = cur.fetchone()["id_titular"]
+                cur.execute("""
+                    INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, false)
+                """, (fecha_vto.month, fecha_vto, id_titular, o.descripcion, -abs(importe), o.id_fondo, id))
         conn.commit()
         return {"ok": True, "fecha_vencimiento": str(fecha_vto), "importe": importe}
     finally:
