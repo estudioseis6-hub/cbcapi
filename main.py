@@ -162,6 +162,7 @@ def get_titulares():
                        COALESCE(tipo_titular, 'PROVEEDOR') tipo_titular,
                        COALESCE(plazo_pago, 0) plazo_pago,
                        cod1, cod2, cod3, cod4, cod5, cod6, cod7, cod8, cod9, cod10,
+                       cod1_id, cod2_id, cod3_id, cod4_id, cod5_id, cod6_id, cod7_id, cod8_id, cod9_id, cod10_id,
                        fondo_def, razon_social, cuit, cond_fiscal,
                        genera_cc, activo, iva_default, cuenta_patrimonial
                 FROM titulares
@@ -3486,21 +3487,30 @@ def get_desglose_por_titular(cuenta: str, fecha_hasta: Optional[str] = None):
     """Para cuentas de PN Origen como 'Aportes de Capital Recibidos' o 'Distribución de
     Capital a Socios', que en Balance aparecen como un solo total — este endpoint trae el
     detalle de cuánto puso/retiró cada Titular, sumando cashflow (que sí guarda el Titular de
-    cada movimiento, a diferencia de asiento_lineas que solo tiene la cuenta contable)."""
+    cada movimiento, a diferencia de asiento_lineas que solo tiene la cuenta contable).
+
+    Resuelve el nombre a su ID una sola vez, y matchea por ID (no por texto) — así, si la
+    cuenta se renombra después, esto sigue encontrando bien todo el historial viejo (siempre
+    que ese historial ya tenga id_cuenta poblado, que es el caso desde que se armó el trigger)."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             fecha_tope = fecha_hasta or date.today().isoformat()
+            cur.execute("SELECT id FROM plan_de_cuentas WHERE nombre = %s", (cuenta,))
+            row_cuenta = cur.fetchone()
+            if not row_cuenta:
+                return []
+            id_cuenta = row_cuenta["id"]
             cur.execute("""
                 SELECT t.nombre AS titular, COALESCE(SUM(c.importe), 0) AS total
                 FROM cashflow c
                 JOIN titulares t ON t.id::text = c.id_titular::text
-                WHERE c.cod_cuenta = %s AND c.fecha <= %s
+                WHERE c.id_cuenta = %s AND c.fecha <= %s
                 AND (c.id_asiento IS NULL OR c.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
                 GROUP BY t.nombre
                 HAVING COALESCE(SUM(c.importe), 0) != 0
                 ORDER BY total DESC
-            """, (cuenta, fecha_tope))
+            """, (id_cuenta, fecha_tope))
             return cur.fetchall()
     finally:
         conn.close()
