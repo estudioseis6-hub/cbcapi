@@ -3341,13 +3341,22 @@ def _crear_asiento(cur, tipo_origen, descripcion=None, fecha=None):
 
 def _agregar_lineas_asiento(cur, id_asiento, lineas):
     """lineas: lista de tuplas (cuenta_patrimonial, debe, haber, descripcion_opcional).
-    Todo asiento tiene que quedar balanceado: suma de debe == suma de haber."""
+    Todo asiento tiene que quedar balanceado: suma de debe == suma de haber.
+
+    Además de guardar el nombre de la cuenta (por compatibilidad con todo lo que ya lee por
+    nombre), busca y guarda también su ID (id_cuenta) — así, de acá en adelante, cada línea
+    queda atada a la cuenta real, sin depender solo del texto. Si algún día se renombra una
+    cuenta, las líneas VIEJAS (con id_cuenta ya guardado) no se rompen — el texto puede quedar
+    desactualizado, pero el ID sigue apuntando a la cuenta correcta."""
     for linea in lineas:
         cuenta, debe, haber = linea[0], linea[1], linea[2]
         desc = linea[3] if len(linea) > 3 else None
+        cur.execute("SELECT id FROM plan_de_cuentas WHERE nombre = %s", (cuenta,))
+        row_cuenta = cur.fetchone()
+        id_cuenta = row_cuenta["id"] if row_cuenta else None
         cur.execute(
-            "INSERT INTO asiento_lineas (id_asiento, cuenta_patrimonial, debe, haber, descripcion) VALUES (%s, %s, %s, %s, %s)",
-            (id_asiento, cuenta, debe, haber, desc)
+            "INSERT INTO asiento_lineas (id_asiento, cuenta_patrimonial, id_cuenta, debe, haber, descripcion) VALUES (%s, %s, %s, %s, %s, %s)",
+            (id_asiento, cuenta, id_cuenta, debe, haber, desc)
         )
 
 def _set_reversion(cur, id_asiento, acciones):
@@ -3534,32 +3543,34 @@ def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None,
             cuentas = cur.fetchall()
 
             # Movimiento del período (para Resultados): solo asientos con fecha DENTRO del mes elegido.
+            # Se agrupa por ID de cuenta (no por nombre de texto) — así, si algún día se renombra
+            # una cuenta, esto sigue funcionando bien, sin depender de que el texto coincida.
             cur.execute("""
-                SELECT al.cuenta_patrimonial, COALESCE(SUM(al.debe - al.haber), 0) AS total
+                SELECT al.id_cuenta, COALESCE(SUM(al.debe - al.haber), 0) AS total
                 FROM asiento_lineas al
                 JOIN asientos a ON a.id = al.id_asiento
-                WHERE a.anulado = false AND a.fecha BETWEEN %s AND %s
-                GROUP BY al.cuenta_patrimonial
+                WHERE a.anulado = false AND a.fecha BETWEEN %s AND %s AND al.id_cuenta IS NOT NULL
+                GROUP BY al.id_cuenta
             """, (fecha_inicio_periodo, fecha_fin_periodo))
-            movimiento_periodo = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+            movimiento_periodo = {r["id_cuenta"]: float(r["total"]) for r in cur.fetchall()}
 
             # Saldo acumulado (para Patrimonial): todo lo que tenga fecha <= fin del mes elegido.
             cur.execute("""
-                SELECT al.cuenta_patrimonial, COALESCE(SUM(al.debe - al.haber), 0) AS total
+                SELECT al.id_cuenta, COALESCE(SUM(al.debe - al.haber), 0) AS total
                 FROM asiento_lineas al
                 JOIN asientos a ON a.id = al.id_asiento
-                WHERE a.anulado = false AND a.fecha <= %s
-                GROUP BY al.cuenta_patrimonial
+                WHERE a.anulado = false AND a.fecha <= %s AND al.id_cuenta IS NOT NULL
+                GROUP BY al.id_cuenta
             """, (fecha_fin_periodo,))
-            saldo_acumulado = {r["cuenta_patrimonial"]: float(r["total"]) for r in cur.fetchall()}
+            saldo_acumulado = {r["id_cuenta"]: float(r["total"]) for r in cur.fetchall()}
 
             resultado = []
             for c in cuentas:
-                nombre = c["nombre"]
+                id_c = c["id"]
                 resultado.append({
                     **c,
-                    "periodo": movimiento_periodo.get(nombre, 0),
-                    "acumulado": saldo_acumulado.get(nombre, 0),
+                    "periodo": movimiento_periodo.get(id_c, 0),
+                    "acumulado": saldo_acumulado.get(id_c, 0),
                 })
             return resultado
     finally:
