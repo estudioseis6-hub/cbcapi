@@ -788,6 +788,7 @@ class ComprobanteIn(BaseModel):
     perc_iibb: Optional[float] = 0
     perc_otras: Optional[float] = 0
     sin_factura: Optional[float] = 0
+    cuenta_gasto_override: Optional[str] = None
 
 def _crear_comprobante(cur, c: ComprobanteIn):
     """El corazón de la carga de una factura/comprobante — separado para poder reusarse desde
@@ -813,13 +814,21 @@ def _crear_comprobante(cur, c: ComprobanteIn):
         + (c.sin_factura or 0)
     )
 
-    # Buscamos las cuentas del Titular: cuenta_patrimonial (el Pasivo, va al Haber)
-    # y nivel4 (la cuenta de Gasto/Resultado, va al Debe) — nada de esto se tipea a mano
-    # en el formulario, ya está configurado una sola vez en Titulares.
-    cur.execute("SELECT cuenta_patrimonial, nivel4 FROM titulares WHERE id = %s", (str(c.id_titular),))
+    # Buscamos las cuentas del Titular: cuenta_patrimonial (el Pasivo, va al Haber),
+    # nivel4 (la cuenta de Gasto/Resultado default, va al Debe), y cod1-cod10 (otras cuentas
+    # de gasto ya aprobadas para este Titular, para cuando vende/factura más de una cosa —
+    # mismo mecanismo que ya usa Tesorería, pensado justo para esto en Titulares).
+    cur.execute("""
+        SELECT cuenta_patrimonial, nivel4, cod1, cod2, cod3, cod4, cod5, cod6, cod7, cod8, cod9, cod10
+        FROM titulares WHERE id = %s
+    """, (str(c.id_titular),))
     row_titular = cur.fetchone() or {}
     cuenta_pasivo = row_titular.get("cuenta_patrimonial")
-    cuenta_gasto = row_titular.get("nivel4")
+    cuentas_aprobadas = {row_titular.get("nivel4")} | {row_titular.get(f"cod{i}") for i in range(1, 11)}
+    cuentas_aprobadas.discard(None)
+    if c.cuenta_gasto_override and c.cuenta_gasto_override not in cuentas_aprobadas:
+        return {"ok": False, "cuenta_no_aprobada": True}
+    cuenta_gasto = c.cuenta_gasto_override or row_titular.get("nivel4")
 
     lineas_asiento = []
     monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
