@@ -3515,6 +3515,62 @@ def get_desglose_por_titular(cuenta: str, fecha_hasta: Optional[str] = None):
     finally:
         conn.close()
 
+@app.get("/diagnostico_ecuacion")
+def diagnostico_ecuacion():
+    """Los mismos 4 chequeos que se venían corriendo a mano por SQL cada vez que Balance no
+    cuadraba — empaquetados en un solo endpoint, para no depender de correr consultas manuales.
+    Se frena en el primer chequeo que encuentre algo (mismo criterio que se usaba a mano:
+    frenar en el primero que devuelva filas, esa es la causa)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # 1) ¿Hay algún asiento individual que no cierra (Debe ≠ Haber)?
+            cur.execute("""
+                SELECT a.id, a.tipo_origen, a.fecha, a.descripcion,
+                       SUM(al.debe) AS total_debe, SUM(al.haber) AS total_haber,
+                       SUM(al.debe) - SUM(al.haber) AS diferencia
+                FROM asientos a
+                JOIN asiento_lineas al ON al.id_asiento = a.id
+                WHERE a.anulado = false
+                GROUP BY a.id, a.tipo_origen, a.fecha, a.descripcion
+                HAVING ABS(SUM(al.debe) - SUM(al.haber)) > 0.5
+                ORDER BY ABS(SUM(al.debe) - SUM(al.haber)) DESC
+                LIMIT 20
+            """)
+            asientos_rotos = cur.fetchall()
+            if asientos_rotos:
+                return {"causa": "asientos_no_balanceados", "detalle": asientos_rotos}
+
+            # 2) ¿Alguna cuenta "Movimiento" (niv1=4, puente) tiene saldo neto ≠ $0?
+            cur.execute("""
+                SELECT al.cuenta_patrimonial, COALESCE(SUM(al.debe - al.haber), 0) AS saldo_neto
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                JOIN plan_de_cuentas p ON p.id = al.id_cuenta
+                WHERE a.anulado = false AND p.niv1 = 4
+                GROUP BY al.cuenta_patrimonial
+                HAVING ABS(COALESCE(SUM(al.debe - al.haber), 0)) > 0.5
+            """)
+            cuentas_puente_rotas = cur.fetchall()
+            if cuentas_puente_rotas:
+                return {"causa": "cuentas_puente_sin_cerrar", "detalle": cuentas_puente_rotas}
+
+            # 3) ¿Hay líneas de asiento sin id_cuenta (no matchean con ninguna cuenta real hoy)?
+            cur.execute("""
+                SELECT DISTINCT al.cuenta_patrimonial, COUNT(*) AS cantidad
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                WHERE a.anulado = false AND al.id_cuenta IS NULL
+                GROUP BY al.cuenta_patrimonial
+            """)
+            huerfanas = cur.fetchall()
+            if huerfanas:
+                return {"causa": "cuentas_huerfanas", "detalle": huerfanas}
+
+            return {"causa": None, "detalle": []}
+    finally:
+        conn.close()
+
 @app.get("/balance_unificado")
 def get_balance_unificado(mes: Optional[int] = None, anio: Optional[int] = None,
                            fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
