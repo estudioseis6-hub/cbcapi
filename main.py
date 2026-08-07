@@ -874,20 +874,28 @@ def _crear_comprobante(cur, c: ComprobanteIn):
     cuenta_gasto = c.cuenta_gasto_override or row_titular.get("nivel4")
 
     lineas_asiento = []
+    # Notas de Crédito (A/B/C — IDs 3, 8, 13) van al revés de una Factura: el proveedor te
+    # devuelve, entonces baja la deuda (Debe Proveedores) y baja el gasto (Haber Gasto/IVA), en
+    # vez de subir. Se identifica por ID de tipos_comprobante — nunca por texto ("Nota de
+    # Crédito A"), justo para que renombrar un tipo de comprobante no rompa esto en silencio.
+    NOTAS_CREDITO_IDS = {3, 8, 13}
+    es_nota_credito = c.id_tipo_comprobante in NOTAS_CREDITO_IDS
+    def _linea(cuenta, monto_debe, monto_haber, desc):
+        return (cuenta, monto_haber, monto_debe, desc) if es_nota_credito else (cuenta, monto_debe, monto_haber, desc)
     monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
     if cuenta_gasto and monto_gasto:
-        lineas_asiento.append((cuenta_gasto, monto_gasto, 0, c.descripcion))
+        lineas_asiento.append(_linea(cuenta_gasto, monto_gasto, 0, c.descripcion))
     monto_iva = (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
     if monto_iva:
-        lineas_asiento.append((_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, 0, c.descripcion))
     if c.perc_iva:
-        lineas_asiento.append((_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, 0, c.descripcion))
     if c.perc_iibb:
-        lineas_asiento.append((_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, 0, c.descripcion))
     if c.perc_otras:
-        lineas_asiento.append((_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, 0, c.descripcion))
     if cuenta_pasivo and importe:
-        lineas_asiento.append((cuenta_pasivo, 0, importe, c.descripcion))
+        lineas_asiento.append(_linea(cuenta_pasivo, 0, importe, c.descripcion))
 
     id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}", fecha_compra)
     if lineas_asiento:
@@ -899,7 +907,7 @@ def _crear_comprobante(cur, c: ComprobanteIn):
              subtotal, exento, iva_105, iva_21, iva_27, perc_iva, perc_iibb, perc_otras, sin_factura, es_informal, id_asiento)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-    """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, importe, fecha.month,
+    """, (fecha, fecha_compra, str(c.id_titular), c.id_tipo_comprobante, c.numero_comprobante, c.descripcion, (-importe if es_nota_credito else importe), fecha.month,
           c.subtotal, c.exento, c.iva_105, c.iva_21, c.iva_27, c.perc_iva, c.perc_iibb, c.perc_otras, c.sin_factura, es_informal, id_asiento))
     id_operacion = cur.fetchone()["id"]
     id_fondo = c.id_fondo
@@ -914,9 +922,9 @@ def _crear_comprobante(cur, c: ComprobanteIn):
             r = cur.fetchone()
             id_fondo = r["id"] if r else None
         else:
-            cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (str(c.id_titular),))
+            cur.execute("SELECT f.id FROM titulares t JOIN fondos f ON f.nombre = t.fondo_def WHERE t.id = %s", (str(c.id_titular),))
             r = cur.fetchone()
-            id_fondo = r["fondo_def"] if r and r["fondo_def"] else None
+            id_fondo = r["id"] if r else None
             # Si el Titular tampoco tiene un Fondo propio configurado, se presume el
             # default general de facturas formales (Configuración) — toda factura
             # formal se asume pagada por Banco salvo que se indique lo contrario, y
@@ -946,7 +954,7 @@ def _crear_comprobante(cur, c: ComprobanteIn):
     cur.execute("""
         INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
         VALUES (%s, %s, %s, %s, %s, %s, %s, false)
-    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, -abs(importe), id_fondo, id_operacion))
+    """, (fecha_vto.month, fecha_vto, str(c.id_titular), c.descripcion, abs(importe) if es_nota_credito else -abs(importe), id_fondo, id_operacion))
     _set_reversion(cur, id_asiento, [
         {"tabla": "cashflow", "where_columna": "id_operacion", "where_valor": id_operacion, "tipo": "DELETE"},
         {"tabla": "operaciones", "where_columna": "id", "where_valor": id_operacion, "tipo": "DELETE"},
@@ -2992,10 +3000,10 @@ def guardar_factura(c: FacturaGuardarIn):
                 fecha_vto = date.fromisoformat(c.fecha_vencimiento) if c.fecha_vencimiento else fecha + timedelta(days=plazo)
                 id_fondo = c.id_fondo
                 if not id_fondo:
-                    cur.execute("SELECT fondo_def FROM titulares WHERE id = %s", (id_titular,))
+                    cur.execute("SELECT f.id FROM titulares t JOIN fondos f ON f.nombre = t.fondo_def WHERE t.id = %s", (id_titular,))
                     r = cur.fetchone()
-                    if r and r["fondo_def"]:
-                        id_fondo = r["fondo_def"]
+                    if r:
+                        id_fondo = r["id"]
                 if id_fondo:
                     cur.execute("""
                         INSERT INTO cashflow (mes, fecha, id_titular, detalle, importe, id_fondo, id_operacion, confirmado)
