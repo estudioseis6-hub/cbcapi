@@ -740,6 +740,48 @@ def get_tipos_comprobante():
     finally:
         conn.close()
 
+@app.get("/tipos_comprobante_admin")
+def get_tipos_comprobante_admin():
+    """Igual que /tipos_comprobante, pero trae TODOS (activos e inactivos) — para la pantalla
+    de administración, no para el desplegable de carga de facturas."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, descripcion, activo FROM tipos_comprobante ORDER BY id")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+class TipoComprobanteIn(BaseModel):
+    descripcion: str
+    activo: Optional[bool] = True
+
+@app.post("/tipos_comprobante")
+def crear_tipo_comprobante(t: TipoComprobanteIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS siguiente FROM tipos_comprobante")
+            siguiente_id = cur.fetchone()["siguiente"]
+            cur.execute("INSERT INTO tipos_comprobante (id, descripcion, activo) VALUES (%s, %s, %s)",
+                        (siguiente_id, t.descripcion, t.activo))
+        conn.commit()
+        return {"ok": True, "id": siguiente_id}
+    finally:
+        conn.close()
+
+@app.put("/tipos_comprobante/{id}")
+def actualizar_tipo_comprobante(id: int, t: TipoComprobanteIn):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE tipos_comprobante SET descripcion=%s, activo=%s WHERE id=%s",
+                        (t.descripcion, t.activo, id))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
 @app.get("/operaciones")
 def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = None):
     conn = get_conn()
@@ -755,7 +797,7 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             elif estado == "PAGO":
                 where.append("o.id_pago IS NOT NULL")
             sql = """
-                SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo,
+                SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo, o.id_tipo_comprobante,
                        o.numero_comprobante numero, o.descripcion concepto, o.importe,
                        o.es_informal,
                        CASE WHEN o.id_pago IS NULL THEN 'IMPAGO' ELSE 'PAGO' END estado
