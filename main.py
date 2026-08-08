@@ -1427,18 +1427,21 @@ def registrar_pago_parcial(p: PagoParcialIn):
                     (cuenta_fondo, 0, monto, p.detalle),
                 ])
 
+            if p.medio_pago == "ECHEQ" and (not p.nro_cheque or not p.fecha_vencimiento):
+                return {"ok": False, "error": "Falta número o fecha de vencimiento del ECheq."}
+            fecha_vto = date.fromisoformat(p.fecha_vencimiento) if p.medio_pago == "ECHEQ" else fecha
             confirmado_pago = (p.medio_pago == "TD")
+            # La fila de Tesorería queda fechada al día del DÉBITO real — la de emisión para
+            # un ECheq (fecha), la del pago en sí para una Transferencia — nunca la de emisión
+            # cuando son distintas, si no el movimiento aparece en la fecha equivocada.
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (fecha.month, fecha, str(op["id_titular"]), p.cod_cuenta, p.detalle, -monto, p.id_fondo, confirmado_pago, id_asiento))
+            """, (fecha_vto.month, fecha_vto, str(op["id_titular"]), p.cod_cuenta, p.detalle, -monto, p.id_fondo, confirmado_pago, id_asiento))
             id_cashflow_pago = cur.fetchone()["id"]
 
             if p.medio_pago == "ECHEQ":
-                if not p.nro_cheque or not p.fecha_vencimiento:
-                    return {"ok": False, "error": "Falta número o fecha de vencimiento del ECheq."}
-                fecha_vto = date.fromisoformat(p.fecha_vencimiento)
                 cur.execute("""
                     INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow, id_asiento)
                     VALUES (%s, %s, %s, 'EMITIDO', %s, %s)
