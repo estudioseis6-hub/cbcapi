@@ -818,6 +818,11 @@ def get_estado_cuenta(id_titular: int):
             pagos = cur.fetchall()
 
             movs = []
+            numero_por_operacion = {c["id"]: c["numero"] for c in compras}
+            pagos_por_operacion = {}
+            for p in pagos:
+                ref = f"ECheq {p['nro_cheque']}" if p["nro_cheque"] else f"Transferencia {str(p['fecha'])}"
+                pagos_por_operacion.setdefault(p["id_operacion"], []).append(ref)
             for c in compras:
                 movs.append({
                     "tipo_mov": "COMPRA", "fecha": str(c["fecha"]), "numero": c["numero"],
@@ -827,6 +832,7 @@ def get_estado_cuenta(id_titular: int):
                     "perc_iibb": c["perc_iibb"], "perc_otras": c["perc_otras"], "sin_factura": c["sin_factura"],
                     "importe": float(c["importe"]), "saldo_pendiente": float(c["saldo_pendiente"]),
                     "id_operacion": c["id"],
+                    "cancelado_por": ", ".join(pagos_por_operacion.get(c["id"], [])) or None,
                 })
             for p in pagos:
                 movs.append({
@@ -834,6 +840,7 @@ def get_estado_cuenta(id_titular: int):
                     "numero": p["nro_cheque"] or "", "tipo_comprobante": "ECheq" if p["nro_cheque"] else "Transferencia",
                     "detalle": p["detalle"], "importe": -abs(float(p["monto"])),
                     "id_operacion": p["id_operacion"],
+                    "aplicado_a": numero_por_operacion.get(p["id_operacion"]) or None,
                 })
             movs.sort(key=lambda m: (m["fecha"], m["tipo_mov"] == "PAGO"))
             saldo = 0
@@ -1266,11 +1273,25 @@ def registrar_pago(p: PagoIn):
             """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo, id_asiento))
             id_pago = cur.fetchone()["id"]
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
+            # Se anota en aplicaciones_pago, factura por factura, por el saldo real que le
+            # quedaba (no siempre el importe original completo — si ya tenía algo aplicado de
+            # un pago parcial anterior, esto la termina de cancelar por la diferencia).
+            cur.execute("""
+                SELECT o.id, ABS(o.importe) - COALESCE((SELECT SUM(monto) FROM aplicaciones_pago WHERE id_operacion = o.id), 0) AS saldo
+                FROM operaciones o WHERE o.id = ANY(%s)
+            """, (p.ids_operaciones,))
+            for fila in cur.fetchall():
+                if fila["saldo"] > 0.5:
+                    cur.execute("""
+                        INSERT INTO aplicaciones_pago (id_operacion, id_cashflow, monto, fecha)
+                        VALUES (%s, %s, %s, %s)
+                    """, (fila["id"], id_pago, fila["saldo"], fecha))
             # Si se revierte: se deshace el pago (vuelve a deberse) y se desvincula la factura,
             # que vuelve a quedar impaga — no se borra la factura en sí, solo el pago.
             _set_reversion(cur, id_asiento, [
                 {"tabla": "operaciones", "where_columna": "id_pago", "where_valor": id_pago, "tipo": "UPDATE",
                  "campos": {"id_pago": None}},
+                {"tabla": "aplicaciones_pago", "where_columna": "id_cashflow", "where_valor": id_pago, "tipo": "DELETE"},
                 {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
             ])
         conn.commit()
@@ -1324,10 +1345,21 @@ def registrar_pago_echeq(p: PagoECheqIn):
                 VALUES (%s, %s, %s, 'EMITIDO', %s, %s)
             """, (p.nro_cheque, fecha_emision, fecha_vto, id_cashflow, id_asiento))
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_cashflow, p.ids_operaciones))
+            cur.execute("""
+                SELECT o.id, ABS(o.importe) - COALESCE((SELECT SUM(monto) FROM aplicaciones_pago WHERE id_operacion = o.id), 0) AS saldo
+                FROM operaciones o WHERE o.id = ANY(%s)
+            """, (p.ids_operaciones,))
+            for fila in cur.fetchall():
+                if fila["saldo"] > 0.5:
+                    cur.execute("""
+                        INSERT INTO aplicaciones_pago (id_operacion, id_cashflow, monto, fecha)
+                        VALUES (%s, %s, %s, %s)
+                    """, (fila["id"], id_cashflow, fila["saldo"], fecha_emision))
             # Si se revierte: el cheque nunca se emitió, la factura vuelve a quedar impaga.
             _set_reversion(cur, id_asiento, [
                 {"tabla": "operaciones", "where_columna": "id_pago", "where_valor": id_cashflow, "tipo": "UPDATE",
                  "campos": {"id_pago": None}},
+                {"tabla": "aplicaciones_pago", "where_columna": "id_cashflow", "where_valor": id_cashflow, "tipo": "DELETE"},
                 {"tabla": "cheques_emitidos", "where_columna": "id_cashflow", "where_valor": id_cashflow, "tipo": "DELETE"},
                 {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
             ])
