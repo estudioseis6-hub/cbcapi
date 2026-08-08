@@ -782,6 +782,68 @@ def actualizar_tipo_comprobante(id: int, t: TipoComprobanteIn):
     finally:
         conn.close()
 
+@app.get("/estado_cuenta")
+def get_estado_cuenta(id_titular: int):
+    """Resumen tipo CBC viejo: todas las Compras (facturas) y todos los Pagos (aplicados a
+    esas facturas) de un Titular, intercalados por fecha, con saldo corrido. Se arma en
+    Python (no en SQL) para calcular el saldo acumulado con el signo correcto sin duplicar
+    lógica — una Compra normal SUMA lo que se debe, una Nota de Crédito RESTA (ya viene con
+    el signo correcto en operaciones.importe), y un Pago siempre RESTA."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT o.id, o.fecha, o.numero_comprobante numero, tc.descripcion tipo_comprobante,
+                       o.descripcion detalle, o.subtotal, o.exento, o.iva_105, o.iva_21, o.iva_27,
+                       o.perc_iva, o.perc_iibb, o.perc_otras, o.sin_factura, o.importe, o.saldo_pendiente
+                FROM (
+                    SELECT o.*, ROUND((ABS(o.importe) - COALESCE(ap.pagado, 0))::numeric, 2) AS saldo_pendiente
+                    FROM operaciones o
+                    LEFT JOIN (SELECT id_operacion, SUM(monto) AS pagado FROM aplicaciones_pago GROUP BY id_operacion) ap
+                           ON ap.id_operacion = o.id
+                    WHERE o.id_titular = %s
+                ) o
+                LEFT JOIN tipos_comprobante tc ON tc.id = o.id_tipo_comprobante
+            """, (str(id_titular),))
+            compras = cur.fetchall()
+
+            cur.execute("""
+                SELECT ap.id, ap.id_operacion, ap.fecha, ap.monto, c.detalle,
+                       che.nro_cheque, che.fecha_vencimiento
+                FROM aplicaciones_pago ap
+                JOIN cashflow c ON c.id = ap.id_cashflow
+                LEFT JOIN cheques_emitidos che ON che.id_cashflow = c.id
+                WHERE ap.id_operacion IN (SELECT id FROM operaciones WHERE id_titular = %s)
+            """, (str(id_titular),))
+            pagos = cur.fetchall()
+
+            movs = []
+            for c in compras:
+                movs.append({
+                    "tipo_mov": "COMPRA", "fecha": str(c["fecha"]), "numero": c["numero"],
+                    "tipo_comprobante": c["tipo_comprobante"], "detalle": c["detalle"],
+                    "subtotal": c["subtotal"], "exento": c["exento"], "iva_105": c["iva_105"],
+                    "iva_21": c["iva_21"], "iva_27": c["iva_27"], "perc_iva": c["perc_iva"],
+                    "perc_iibb": c["perc_iibb"], "perc_otras": c["perc_otras"], "sin_factura": c["sin_factura"],
+                    "importe": float(c["importe"]), "saldo_pendiente": float(c["saldo_pendiente"]),
+                    "id_operacion": c["id"],
+                })
+            for p in pagos:
+                movs.append({
+                    "tipo_mov": "PAGO", "fecha": str(p["fecha"]),
+                    "numero": p["nro_cheque"] or "", "tipo_comprobante": "ECheq" if p["nro_cheque"] else "Transferencia",
+                    "detalle": p["detalle"], "importe": -abs(float(p["monto"])),
+                    "id_operacion": p["id_operacion"],
+                })
+            movs.sort(key=lambda m: (m["fecha"], m["tipo_mov"] == "PAGO"))
+            saldo = 0
+            for m in movs:
+                saldo += m["importe"]
+                m["saldo_acumulado"] = round(saldo, 2)
+            return movs
+    finally:
+        conn.close()
+
 @app.get("/operaciones")
 def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = None):
     conn = get_conn()
