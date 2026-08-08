@@ -792,22 +792,31 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             if id_titular:
                 where.append("o.id_titular = %s")
                 params.append(str(id_titular))
-            if estado == "IMPAGO":
-                where.append("o.id_pago IS NULL")
-            elif estado == "PAGO":
-                where.append("o.id_pago IS NOT NULL")
             sql = """
-                SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo, o.id_tipo_comprobante,
-                       o.numero_comprobante numero, o.descripcion concepto, o.importe,
-                       o.es_informal,
-                       CASE WHEN o.id_pago IS NULL THEN 'IMPAGO' ELSE 'PAGO' END estado
-                FROM operaciones o
-                LEFT JOIN titulares t ON o.id_titular = t.id
-                LEFT JOIN tipos_comprobante tc ON o.id_tipo_comprobante = tc.id
+                SELECT * FROM (
+                    SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo, o.id_tipo_comprobante,
+                           o.numero_comprobante numero, o.descripcion concepto, o.importe,
+                           o.es_informal,
+                           COALESCE(ap.pagado, 0) AS pagado,
+                           ROUND((ABS(o.importe) - COALESCE(ap.pagado, 0))::numeric, 2) AS saldo_pendiente,
+                           CASE
+                               WHEN o.id_pago IS NOT NULL OR COALESCE(ap.pagado, 0) >= ABS(o.importe) - 0.5 THEN 'PAGO'
+                               WHEN COALESCE(ap.pagado, 0) > 0.5 THEN 'PARCIAL'
+                               ELSE 'IMPAGO'
+                           END estado
+                    FROM operaciones o
+                    LEFT JOIN titulares t ON o.id_titular = t.id
+                    LEFT JOIN tipos_comprobante tc ON o.id_tipo_comprobante = tc.id
+                    LEFT JOIN (SELECT id_operacion, SUM(monto) AS pagado FROM aplicaciones_pago GROUP BY id_operacion) ap
+                           ON ap.id_operacion = o.id
+                ) sub
             """
+            if estado and estado != "Todos":
+                where.append("sub.estado = %s")
+                params.append(estado)
             if where:
                 sql += " WHERE " + " AND ".join(where)
-            sql += " ORDER BY o.fecha DESC LIMIT 200"
+            sql += " ORDER BY sub.fecha DESC LIMIT 200"
             cur.execute(sql, params)
             return cur.fetchall()
     finally:
@@ -1258,6 +1267,120 @@ def registrar_pago_echeq(p: PagoECheqIn):
             ])
         conn.commit()
         return {"ok": True, "id_cashflow": id_cashflow, "total": total}
+    finally:
+        conn.close()
+
+class PagoParcialIn(BaseModel):
+    fecha: str
+    id_operacion: int
+    id_fondo: int
+    cod_cuenta: str
+    detalle: str
+    monto: float
+    medio_pago: str = "TD"  # "TD" o "ECHEQ"
+    nro_cheque: Optional[str] = None
+    fecha_vencimiento: Optional[str] = None
+
+@app.post("/registrar_pago_parcial")
+def registrar_pago_parcial(p: PagoParcialIn):
+    """Paga una parte (o el resto) de UNA factura puntual — a diferencia de /registrar_pago,
+    que siempre exige el total completo. Pensado para el caso real: varios cheques con fechas
+    de débito distintas cubriendo entre todos una misma factura, cargados uno a la vez.
+
+    Cada aplicación queda registrada en 'aplicaciones_pago' (factura + pago + cuánto cubrió).
+    El estado de la factura (IMPAGO/PARCIAL/PAGO) ya NO es una columna fija — se calcula en
+    GET /operaciones comparando lo aplicado contra el total, así siempre queda consistente."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id_titular, importe, es_informal FROM operaciones WHERE id = %s", (p.id_operacion,))
+            op = cur.fetchone()
+            if not op:
+                return {"ok": False, "error": "Operación no encontrada."}
+            if op["es_informal"] and p.medio_pago == "ECHEQ":
+                return {"ok": False, "error_fondo_informal": True}
+
+            monto = abs(p.monto)
+            if monto <= 0:
+                return {"ok": False, "error": "El monto tiene que ser mayor a $0."}
+            fecha = date.fromisoformat(p.fecha)
+
+            cur.execute("SELECT * FROM cashflow WHERE id_operacion = %s AND confirmado = false", (p.id_operacion,))
+            proyectado = cur.fetchone()
+            saldo_pendiente = abs(proyectado["importe"]) if proyectado else abs(op["importe"])
+            if monto > saldo_pendiente + 0.5:
+                return {"ok": False, "error": f"El monto (${monto:,.2f}) supera el saldo pendiente (${saldo_pendiente:,.2f})."}
+
+            tipo_asiento = "PAGO_ECHEQ_PARCIAL" if p.medio_pago == "ECHEQ" else "PAGO_PARCIAL"
+            id_asiento = _crear_asiento(cur, tipo_asiento, p.detalle or f"Pago parcial — operación #{p.id_operacion}", fecha)
+            if p.medio_pago == "ECHEQ":
+                # Mismo criterio que un ECheq completo: cancela parte de la deuda (Debe) y
+                # aparece "Valores Emitidos" (Haber) — todavía no salió del banco de verdad.
+                _agregar_lineas_asiento(cur, id_asiento, [
+                    (p.cod_cuenta, monto, 0, p.detalle),
+                    (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, p.detalle),
+                ])
+            else:
+                cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (p.id_fondo,))
+                fila_fondo = cur.fetchone()
+                cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{p.id_fondo}")
+                _agregar_lineas_asiento(cur, id_asiento, [
+                    (p.cod_cuenta, monto, 0, p.detalle),
+                    (cuenta_fondo, 0, monto, p.detalle),
+                ])
+
+            confirmado_pago = (p.medio_pago == "TD")
+            cur.execute("""
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (fecha.month, fecha, str(op["id_titular"]), p.cod_cuenta, p.detalle, -monto, p.id_fondo, confirmado_pago, id_asiento))
+            id_cashflow_pago = cur.fetchone()["id"]
+
+            if p.medio_pago == "ECHEQ":
+                if not p.nro_cheque or not p.fecha_vencimiento:
+                    return {"ok": False, "error": "Falta número o fecha de vencimiento del ECheq."}
+                fecha_vto = date.fromisoformat(p.fecha_vencimiento)
+                cur.execute("""
+                    INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow, id_asiento)
+                    VALUES (%s, %s, %s, 'EMITIDO', %s, %s)
+                """, (p.nro_cheque, fecha, fecha_vto, id_cashflow_pago, id_asiento))
+
+            cur.execute("""
+                INSERT INTO aplicaciones_pago (id_operacion, id_cashflow, monto, fecha)
+                VALUES (%s, %s, %s, %s)
+            """, (p.id_operacion, id_cashflow_pago, monto, fecha))
+
+            nuevo_saldo = saldo_pendiente - monto
+            reversion_acciones = [
+                {"tabla": "aplicaciones_pago", "where_columna": "id_cashflow", "where_valor": id_cashflow_pago, "tipo": "DELETE"},
+                {"tabla": "cheques_emitidos", "where_columna": "id_cashflow", "where_valor": id_cashflow_pago, "tipo": "DELETE"},
+                {"tabla": "operaciones", "where_columna": "id_pago", "where_valor": id_cashflow_pago, "tipo": "UPDATE", "campos": {"id_pago": None}},
+                {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
+            ]
+            if nuevo_saldo <= 0.5:
+                # Se termina de cancelar del todo con este pago — se saca la proyección (si
+                # quedaba) y se marca la operación como pagada, mismo criterio que un pago
+                # completo. Si se revierte, la proyección se recrea tal cual estaba.
+                if proyectado:
+                    cur.execute("DELETE FROM cashflow WHERE id = %s", (proyectado["id"],))
+                    reversion_acciones.append({
+                        "tabla": "cashflow", "where_columna": "id", "where_valor": None, "tipo": "INSERT",
+                        "campos": {k: v for k, v in proyectado.items()},
+                    })
+                cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = %s", (id_cashflow_pago, p.id_operacion))
+            elif proyectado:
+                # Queda un saldo — la proyección se reduce (nunca se borra), y la operación
+                # NO se marca pagada; su estado "PARCIAL" sale de aplicaciones_pago.
+                importe_original = proyectado["importe"]
+                cur.execute("UPDATE cashflow SET importe = %s WHERE id = %s", (importe_original + monto, proyectado["id"]))
+                reversion_acciones.append({
+                    "tabla": "cashflow", "where_columna": "id", "where_valor": proyectado["id"], "tipo": "UPDATE",
+                    "campos": {"importe": importe_original},
+                })
+            _set_reversion(cur, id_asiento, reversion_acciones)
+        conn.commit()
+        return {"ok": True, "id_cashflow": id_cashflow_pago, "monto": monto, "saldo_restante": max(round(nuevo_saldo, 2), 0)}
     finally:
         conn.close()
 
@@ -3429,6 +3552,11 @@ def _set_reversion(cur, id_asiento, acciones):
       - Para actualizar campos en vez de borrar (ej. "volver a Pendiente" sin borrar el registro):
           {"tabla": "cheques_apertura", "where_columna": "id", "where_valor": 7, "tipo": "UPDATE",
            "campos": {"debitado": False, "id_asiento_debito": None}}
+      - Para recrear una fila que se borró en el camino (ej. una proyección que un pago
+        parcial completó y eliminó) — 'campos' trae TODOS los valores originales de la fila:
+          {"tabla": "cashflow", "where_columna": "id", "where_valor": None, "tipo": "INSERT",
+           "campos": {"id": 123, "mes": 3, "fecha": "2025-03-31", ...}}
+        (where_columna/where_valor no se usan para INSERT, pero hay que incluirlos igual)
     'where_valor' casi siempre es el propio id_asiento, salvo que la acción tenga que apuntar a
     un id específico de otra tabla (ej. el id de la fila de cheques_apertura)."""
     cur.execute("UPDATE asientos SET reversion_acciones = %s WHERE id = %s", (json.dumps(acciones), id_asiento))
@@ -3733,6 +3861,14 @@ def _ejecutar_reversion(cur, id):
             campos = accion["campos"]
             sets = ", ".join(f"{k} = %s" for k in campos)
             cur.execute(f"UPDATE {tabla} SET {sets} WHERE {where_col} = %s", (*campos.values(), where_val))
+        elif accion["tipo"] == "INSERT":
+            # Para recrear una fila que la reversión borró en otro lado (ej. la proyección
+            # de saldo pendiente que un pago parcial completó y eliminó) — 'campos' trae
+            # TODOS los valores originales de esa fila, tal cual estaban antes de borrarla.
+            campos = accion["campos"]
+            cols = ", ".join(campos.keys())
+            placeholders = ", ".join(["%s"] * len(campos))
+            cur.execute(f"INSERT INTO {tabla} ({cols}) VALUES ({placeholders})", tuple(campos.values()))
 
     # Red de seguridad para asientos viejos, creados antes de que existiera
     # 'reversion_acciones' — mismo comportamiento genérico de siempre (borrar todo lo
