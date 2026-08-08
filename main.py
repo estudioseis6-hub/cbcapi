@@ -918,9 +918,16 @@ def _crear_comprobante(cur, c: ComprobanteIn):
             return {"ok": False, "error_fondo_informal": True}
     else:
         if es_informal:
-            cur.execute("SELECT id FROM fondos WHERE tipo = 'Efectivo' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
-            r = cur.fetchone()
-            id_fondo = r["id"] if r else None
+            # Mismo criterio que el default de facturas formales, pero separado — un
+            # comprobante informal se presume pagado en Efectivo $, configurable aparte
+            # (antes tomaba "cualquiera que sea Efectivo primero", sin dejar elegir cuál).
+            cur.execute("SELECT valor FROM configuracion WHERE clave = 'fondo_default_informal'")
+            cfg = cur.fetchone()
+            id_fondo = int(cfg["valor"]) if cfg and cfg["valor"] else None
+            if not id_fondo:
+                cur.execute("SELECT id FROM fondos WHERE tipo = 'Efectivo' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
+                r = cur.fetchone()
+                id_fondo = r["id"] if r else None
         else:
             cur.execute("SELECT f.id FROM titulares t JOIN fondos f ON f.nombre = t.fondo_def WHERE t.id = %s", (str(c.id_titular),))
             r = cur.fetchone()
