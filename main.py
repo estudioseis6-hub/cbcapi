@@ -1373,7 +1373,7 @@ def registrar_pago_parcial(p: PagoParcialIn):
             if monto > saldo_pendiente + 0.5:
                 return {"ok": False, "error": f"El monto (${monto:,.2f}) supera el saldo pendiente (${saldo_pendiente:,.2f})."}
 
-            tipo_asiento = "PAGO_ECHEQ_PARCIAL" if p.medio_pago == "ECHEQ" else "PAGO_PARCIAL"
+            tipo_asiento = "PAGO_ECHEQ" if p.medio_pago == "ECHEQ" else "PAGO"
             id_asiento = _crear_asiento(cur, tipo_asiento, p.detalle or f"Pago parcial — operación #{p.id_operacion}", fecha)
             if p.medio_pago == "ECHEQ":
                 # Mismo criterio que un ECheq completo: cancela parte de la deuda (Debe) y
