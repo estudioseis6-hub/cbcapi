@@ -873,7 +873,11 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
                            ON ap.id_operacion = o.id
                 ) sub
             """
-            if estado and estado != "Todos":
+            if estado == "PENDIENTE":
+                # Valor virtual — agrupa lo que todavía falta cobrar/pagar, sin importar si
+                # es IMPAGO (nada aplicado) o PARCIAL (algo aplicado, pero no todo).
+                where.append("sub.estado IN ('IMPAGO', 'PARCIAL')")
+            elif estado and estado != "Todos":
                 where.append("sub.estado = %s")
                 params.append(estado)
             if where:
