@@ -852,7 +852,7 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
             where = []
             params = []
             if id_titular:
-                where.append("o.id_titular = %s")
+                where.append("sub.id_titular = %s")
                 params.append(str(id_titular))
             sql = """
                 SELECT * FROM (
@@ -1369,7 +1369,7 @@ def registrar_pago_parcial(p: PagoParcialIn):
 
             cur.execute("SELECT * FROM cashflow WHERE id_operacion = %s AND confirmado = false", (p.id_operacion,))
             proyectado = cur.fetchone()
-            saldo_pendiente = abs(proyectado["importe"]) if proyectado else abs(op["importe"])
+            saldo_pendiente = float(abs(proyectado["importe"])) if proyectado else float(abs(op["importe"]))
             if monto > saldo_pendiente + 0.5:
                 return {"ok": False, "error": f"El monto (${monto:,.2f}) supera el saldo pendiente (${saldo_pendiente:,.2f})."}
 
@@ -1434,7 +1434,7 @@ def registrar_pago_parcial(p: PagoParcialIn):
             elif proyectado:
                 # Queda un saldo — la proyección se reduce (nunca se borra), y la operación
                 # NO se marca pagada; su estado "PARCIAL" sale de aplicaciones_pago.
-                importe_original = proyectado["importe"]
+                importe_original = float(proyectado["importe"])
                 cur.execute("UPDATE cashflow SET importe = %s WHERE id = %s", (importe_original + monto, proyectado["id"]))
                 reversion_acciones.append({
                     "tabla": "cashflow", "where_columna": "id", "where_valor": proyectado["id"], "tipo": "UPDATE",
