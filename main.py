@@ -390,6 +390,7 @@ def confirmar_vencimiento(id: int, body: ConfirmarPagoIn = None):
                         (cuenta_fondo, 0, importe_echeq, "Débito de ECheq"),
                     ])
                     cur.execute("UPDATE cheques_emitidos SET id_asiento_debito = %s WHERE id_cashflow = %s", (nuevo_asiento, id))
+                    cur.execute("UPDATE cashflow SET confirmado = true WHERE id = %s", (id,))
                     _set_reversion(cur, nuevo_asiento, [
                         {"tabla": "cheques_emitidos", "where_columna": "id_cashflow", "where_valor": id, "tipo": "UPDATE",
                          "campos": {"id_asiento_debito": None, "estado": "EMITIDO"}},
