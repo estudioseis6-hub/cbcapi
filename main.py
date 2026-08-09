@@ -3769,16 +3769,17 @@ def get_mayor_por_fondo(mes: Optional[int] = None, anio: Optional[int] = None,
                 d_fin = hoy.isoformat()
 
             cur.execute("""
-                SELECT c.cod_cuenta AS cuenta,
+                SELECT COALESCE(p.nombre, c.cod_cuenta) AS cuenta,
                     COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) AS efvo_ars,
                     COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) AS cuentas_ars,
                     COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) AS efvo_usd,
                     COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) AS cuentas_usd
                 FROM cashflow c
                 LEFT JOIN fondos f ON f.id = c.id_fondo
-                WHERE c.fecha BETWEEN %s AND %s
+                LEFT JOIN plan_de_cuentas p ON p.id = c.id_cuenta
+                WHERE c.fecha BETWEEN %s AND %s AND c.confirmado = true
                 AND (c.id_asiento IS NULL OR c.id_asiento NOT IN (SELECT id FROM asientos WHERE anulado = true))
-                GROUP BY c.cod_cuenta
+                GROUP BY COALESCE(p.nombre, c.cod_cuenta)
                 HAVING COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) != 0
                     OR COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) != 0
                     OR COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) != 0
