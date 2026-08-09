@@ -204,6 +204,16 @@ def crear_titular(t: TitularIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            if t.cuit and t.cuit.strip():
+                cuit_norm = _solo_digitos(t.cuit)
+                cur.execute("""
+                    SELECT nombre FROM titulares
+                    WHERE cuit IS NOT NULL AND regexp_replace(cuit, '\\D', '', 'g') = %s
+                    LIMIT 1
+                """, (cuit_norm,))
+                existe = cur.fetchone()
+                if existe:
+                    return {"ok": False, "error": f'Ya existe un Titular con este CUIT: "{existe["nombre"]}".'}
             cur.execute("""
                 INSERT INTO titulares (nombre, nivel1, nivel2, nivel3, nivel4, tipo_titular, plazo_pago,
                        razon_social, cuit, cond_fiscal,
@@ -224,6 +234,16 @@ def actualizar_titular(id: str, t: TitularIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            if t.cuit and t.cuit.strip():
+                cuit_norm = _solo_digitos(t.cuit)
+                cur.execute("""
+                    SELECT nombre FROM titulares
+                    WHERE cuit IS NOT NULL AND regexp_replace(cuit, '\\D', '', 'g') = %s AND id != %s
+                    LIMIT 1
+                """, (cuit_norm, id))
+                existe = cur.fetchone()
+                if existe:
+                    return {"ok": False, "error": f'Ya existe otro Titular con este CUIT: "{existe["nombre"]}".'}
             cur.execute("""
                 UPDATE titulares SET nombre=%s, nivel1=%s, nivel2=%s, nivel3=%s, nivel4=%s, tipo_titular=%s, plazo_pago=%s,
                        razon_social=%s, cuit=%s, cond_fiscal=%s,
