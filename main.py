@@ -3745,6 +3745,32 @@ def get_lineas_asiento(id: int):
     finally:
         conn.close()
 
+@app.get("/cheques_pendientes")
+def get_cheques_pendientes():
+    """Todo cheque emitido que todavía no se debitó — sacado directo de las tablas reales
+    (cheques_emitidos, cashflow, titulares, aplicaciones_pago), sin ningún cálculo indirecto.
+    Pensado para poder mirar "adentro" del sistema sin tener que escribir SQL a mano."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ch.id, ch.nro_cheque, ch.fecha_emision, ch.fecha_vencimiento,
+                       ABS(c.importe) AS importe, c.detalle,
+                       t.nombre AS titular, f.nombre AS fondo,
+                       o.numero_comprobante AS factura_aplicada
+                FROM cheques_emitidos ch
+                JOIN cashflow c ON c.id = ch.id_cashflow
+                LEFT JOIN titulares t ON t.id::text = c.id_titular::text
+                LEFT JOIN fondos f ON f.id = c.id_fondo
+                LEFT JOIN aplicaciones_pago ap ON ap.id_cashflow = c.id
+                LEFT JOIN operaciones o ON o.id = ap.id_operacion
+                WHERE c.confirmado = false
+                ORDER BY ch.fecha_vencimiento
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
 @app.get("/mayor_por_fondo")
 def get_mayor_por_fondo(mes: Optional[int] = None, anio: Optional[int] = None,
                         fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
