@@ -3784,7 +3784,7 @@ def get_mayor_por_fondo(mes: Optional[int] = None, anio: Optional[int] = None,
                     OR COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda != 'USD' THEN c.importe ELSE 0 END), 0) != 0
                     OR COALESCE(SUM(CASE WHEN f.tipo = 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) != 0
                     OR COALESCE(SUM(CASE WHEN f.tipo != 'Efectivo' AND f.moneda = 'USD' THEN c.cantidad_moneda ELSE 0 END), 0) != 0
-                ORDER BY c.cod_cuenta
+                ORDER BY cuenta
             """, (d_inicio, d_fin))
             return cur.fetchall()
     finally:
