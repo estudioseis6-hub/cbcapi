@@ -3788,6 +3788,44 @@ def get_cheques_pendientes():
     finally:
         conn.close()
 
+@app.get("/mayor_cuenta")
+def get_mayor_cuenta(id_cuenta: int, fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
+    """Libro Mayor de UNA cuenta puntual — todos los movimientos (Debe/Haber) que la tocaron,
+    en orden cronológico, con saldo corrido línea por línea. A diferencia de Mayor por Fondo
+    (que solo cubre cuentas de Fondos, sacado de cashflow), esto sirve para CUALQUIER cuenta
+    del Plan de Cuentas, sacado directo de asiento_lineas — la fuente contable real."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = ["al.id_cuenta = %s", "a.anulado = false"]
+            params = [id_cuenta]
+            if fecha_desde:
+                where.append("a.fecha >= %s")
+                params.append(fecha_desde)
+            if fecha_hasta:
+                where.append("a.fecha <= %s")
+                params.append(fecha_hasta)
+            cur.execute(f"""
+                SELECT p.nombre AS cuenta, p.signo
+                FROM plan_de_cuentas p WHERE p.id = %s
+            """, (id_cuenta,))
+            cuenta_info = cur.fetchone()
+            cur.execute(f"""
+                SELECT al.id, a.fecha, a.tipo_origen, a.descripcion, al.debe, al.haber
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                WHERE {" AND ".join(where)}
+                ORDER BY a.fecha, al.id
+            """, params)
+            movs = cur.fetchall()
+            saldo = 0
+            for m in movs:
+                saldo += float(m["debe"] or 0) - float(m["haber"] or 0)
+                m["saldo"] = round(saldo, 2)
+            return {"cuenta": cuenta_info["cuenta"] if cuenta_info else None, "movimientos": movs}
+    finally:
+        conn.close()
+
 @app.get("/mayor_por_fondo")
 def get_mayor_por_fondo(mes: Optional[int] = None, anio: Optional[int] = None,
                         fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
