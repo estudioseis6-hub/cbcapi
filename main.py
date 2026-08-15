@@ -756,7 +756,7 @@ def get_tipos_comprobante():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, descripcion FROM tipos_comprobante WHERE activo=true ORDER BY id")
+            cur.execute("SELECT id, descripcion, exige_iva FROM tipos_comprobante WHERE activo=true ORDER BY id")
             return cur.fetchall()
     finally:
         conn.close()
@@ -768,7 +768,7 @@ def get_tipos_comprobante_admin():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, descripcion, activo FROM tipos_comprobante ORDER BY id")
+            cur.execute("SELECT id, descripcion, activo, exige_iva FROM tipos_comprobante ORDER BY id")
             return cur.fetchall()
     finally:
         conn.close()
@@ -776,6 +776,7 @@ def get_tipos_comprobante_admin():
 class TipoComprobanteIn(BaseModel):
     descripcion: str
     activo: Optional[bool] = True
+    exige_iva: Optional[bool] = False
 
 @app.post("/tipos_comprobante")
 def crear_tipo_comprobante(t: TipoComprobanteIn):
@@ -784,8 +785,8 @@ def crear_tipo_comprobante(t: TipoComprobanteIn):
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS siguiente FROM tipos_comprobante")
             siguiente_id = cur.fetchone()["siguiente"]
-            cur.execute("INSERT INTO tipos_comprobante (id, descripcion, activo) VALUES (%s, %s, %s)",
-                        (siguiente_id, t.descripcion, t.activo))
+            cur.execute("INSERT INTO tipos_comprobante (id, descripcion, activo, exige_iva) VALUES (%s, %s, %s, %s)",
+                        (siguiente_id, t.descripcion, t.activo, t.exige_iva))
         conn.commit()
         return {"ok": True, "id": siguiente_id}
     finally:
@@ -796,8 +797,8 @@ def actualizar_tipo_comprobante(id: int, t: TipoComprobanteIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE tipos_comprobante SET descripcion=%s, activo=%s WHERE id=%s",
-                        (t.descripcion, t.activo, id))
+            cur.execute("UPDATE tipos_comprobante SET descripcion=%s, activo=%s, exige_iva=%s WHERE id=%s",
+                        (t.descripcion, t.activo, t.exige_iva, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -873,16 +874,23 @@ def get_estado_cuenta(id_titular: int):
         conn.close()
 
 @app.get("/operaciones")
-def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = None):
+def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = None, fecha_hasta: Optional[str] = None):
+    """fecha_hasta (opcional, "AAAA-MM-DD") — si se manda, el saldo/estado de cada factura se
+    calcula "a esa fecha" (para comparar contra el Balance de un mes puntual), no "a hoy".
+    Facturas cargadas DESPUÉS de esa fecha directamente no aparecen (todavía no existían), y
+    los pagos aplicados después de esa fecha no cuentan para el saldo."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            where = []
-            params = []
-            if id_titular:
-                where.append("sub.id_titular = %s")
-                params.append(str(id_titular))
-            sql = """
+            params_query = []
+            filtro_fecha_ap = ""
+            filtro_fecha_op = ""
+            if fecha_hasta:
+                filtro_fecha_ap = " AND ap_raw.fecha <= %s"
+                params_query.append(fecha_hasta)
+                filtro_fecha_op = " AND o.fecha <= %s"
+                params_query.append(fecha_hasta)
+            sql = f"""
                 SELECT * FROM (
                     SELECT o.id, o.fecha, o.id_titular, t.nombre titular, tc.descripcion tipo, o.id_tipo_comprobante,
                            o.numero_comprobante numero, o.descripcion concepto, o.importe,
@@ -890,17 +898,26 @@ def get_operaciones(id_titular: Optional[int] = None, estado: Optional[str] = No
                            COALESCE(ap.pagado, 0) AS pagado,
                            ROUND((ABS(o.importe) - COALESCE(ap.pagado, 0))::numeric, 2) AS saldo_pendiente,
                            CASE
-                               WHEN o.id_pago IS NOT NULL OR COALESCE(ap.pagado, 0) >= ABS(o.importe) - 0.5 THEN 'PAGO'
+                               WHEN {"false" if fecha_hasta else "o.id_pago IS NOT NULL OR"} COALESCE(ap.pagado, 0) >= ABS(o.importe) - 0.5 THEN 'PAGO'
                                WHEN COALESCE(ap.pagado, 0) > 0.5 THEN 'PARCIAL'
                                ELSE 'IMPAGO'
                            END estado
                     FROM operaciones o
                     LEFT JOIN titulares t ON o.id_titular = t.id
                     LEFT JOIN tipos_comprobante tc ON o.id_tipo_comprobante = tc.id
-                    LEFT JOIN (SELECT id_operacion, SUM(monto) AS pagado FROM aplicaciones_pago GROUP BY id_operacion) ap
+                    LEFT JOIN (SELECT ap_raw.id_operacion, SUM(ap_raw.monto) AS pagado FROM aplicaciones_pago ap_raw WHERE true{filtro_fecha_ap} GROUP BY ap_raw.id_operacion) ap
                            ON ap.id_operacion = o.id
+                    WHERE true{filtro_fecha_op}
                 ) sub
             """
+            where = []
+            params = list(params_query)
+            if id_titular:
+                where.append("sub.id_titular = %s")
+                params.append(str(id_titular))
+            # Nota: cuando hay fecha_hasta, "PAGO" se calcula solo por lo efectivamente
+            # aplicado hasta esa fecha (no por o.id_pago, que refleja el estado ACTUAL, no el
+            # histórico a esa fecha puntual — una factura pagada HOY no estaba pagada en julio).
             if estado == "PENDIENTE":
                 # Valor virtual — agrupa lo que todavía falta cobrar/pagar, sin importar si
                 # es IMPAGO (nada aplicado) o PARCIAL (algo aplicado, pero no todo).
