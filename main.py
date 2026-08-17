@@ -3824,6 +3824,40 @@ def get_balance_comprobacion(fecha_desde: Optional[str] = None, fecha_hasta: Opt
     finally:
         conn.close()
 
+@app.get("/efecto_patrimonial")
+def get_efecto_patrimonial(id_cuenta: int, fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
+    """Para UNA cuenta de Resultados (ej. "Frutas y Verduras"), muestra contra qué cuentas
+    Patrimoniales fue cada movimiento — cuánto terminó en Proveedores a Pagar, cuánto en
+    Efectivo, etc. — agrupado por la cuenta del otro lado de cada asiento, no la lista plana
+    de líneas de la cuenta en sí (eso ya lo hace Mayor por Cuenta)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = ["al.id_cuenta = %s", "a.anulado = false"]
+            params = [id_cuenta]
+            if fecha_desde:
+                where.append("a.fecha >= %s")
+                params.append(fecha_desde)
+            if fecha_hasta:
+                where.append("a.fecha <= %s")
+                params.append(fecha_hasta)
+            # Para cada asiento que toca esta cuenta, se buscan las OTRAS líneas del mismo
+            # asiento (el otro lado de la partida doble) y se agrupan por esa cuenta.
+            cur.execute(f"""
+                SELECT p2.id, p2.nombre AS cuenta, p2.niv1_desc, p2.niv2_desc,
+                       SUM(al2.debe) AS total_debe, SUM(al2.haber) AS total_haber
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                JOIN asiento_lineas al2 ON al2.id_asiento = al.id_asiento AND al2.id != al.id
+                LEFT JOIN plan_de_cuentas p2 ON p2.id = al2.id_cuenta
+                WHERE {" AND ".join(where)}
+                GROUP BY p2.id, p2.nombre, p2.niv1_desc, p2.niv2_desc
+                ORDER BY (SUM(al2.debe) + SUM(al2.haber)) DESC
+            """, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
 @app.get("/mayor_cuenta")
 def get_mayor_cuenta(id_cuenta: int, fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
     """Libro Mayor de UNA cuenta puntual — todos los movimientos (Debe/Haber) que la tocaron,
