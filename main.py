@@ -3826,6 +3826,66 @@ def get_balance_comprobacion(fecha_desde: Optional[str] = None, fecha_hasta: Opt
     finally:
         conn.close()
 
+@app.get("/matriz_trazabilidad")
+def get_matriz_trazabilidad(fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
+    """Matriz cruzada — filas son cuentas de Resultados y de Movimiento (puente), columnas son
+    los rubros (Nivel 4) de Patrimonial que afectaron. Cada fila cierra en $0 (su propio
+    saldo + todas las columnas patrimoniales de esa fila) — si no cierra, hay algo mal
+    conectado en esa cuenta puntual. Da la trazabilidad completa del sistema de un vistazo."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = ["a.anulado = false"]
+            params = []
+            if fecha_desde:
+                where.append("a.fecha >= %s")
+                params.append(fecha_desde)
+            if fecha_hasta:
+                where.append("a.fecha <= %s")
+                params.append(fecha_hasta)
+            filtro = " AND ".join(where)
+            # 1) Cada fila (cuenta de Resultados o Movimiento) con su propio saldo.
+            cur.execute(f"""
+                SELECT p1.id, p1.nombre AS cuenta, p1.niv1_desc, p1.niv2_desc,
+                       SUM(al.debe - al.haber) AS saldo_propio
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                JOIN plan_de_cuentas p1 ON p1.id = al.id_cuenta
+                WHERE p1.niv1_desc IN ('Resultados', 'Movimiento') AND {filtro}
+                GROUP BY p1.id, p1.nombre, p1.niv1_desc, p1.niv2_desc
+                HAVING SUM(al.debe - al.haber) != 0
+                ORDER BY p1.niv1_desc, p1.niv2_desc, p1.nombre
+            """, params)
+            filas = cur.fetchall()
+            # 2) Para cada fila, cuánto fue a cada rubro (Nivel 4) Patrimonial del otro lado.
+            cur.execute(f"""
+                SELECT al.id_cuenta AS id_fila, p2.niv4_desc AS columna,
+                       SUM(al2.debe - al2.haber) AS monto
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                JOIN plan_de_cuentas p1 ON p1.id = al.id_cuenta AND p1.niv1_desc IN ('Resultados', 'Movimiento')
+                JOIN asiento_lineas al2 ON al2.id_asiento = al.id_asiento AND al2.id != al.id
+                JOIN plan_de_cuentas p2 ON p2.id = al2.id_cuenta AND p2.niv1_desc = 'Patrimonial'
+                WHERE {filtro}
+                GROUP BY al.id_cuenta, p2.niv4_desc
+            """, params)
+            cruces = cur.fetchall()
+            columnas_por_fila = {}
+            for c in cruces:
+                columnas_por_fila.setdefault(c["id_fila"], {})[c["columna"]] = float(c["monto"])
+            columnas_todas = sorted({c["columna"] for c in cruces if c["columna"]})
+            resultado = []
+            for f in filas:
+                cols = columnas_por_fila.get(f["id"], {})
+                verificacion = round(float(f["saldo_propio"]) + sum(cols.values()), 2)
+                resultado.append({
+                    "id": f["id"], "cuenta": f["cuenta"], "niv1_desc": f["niv1_desc"], "niv2_desc": f["niv2_desc"],
+                    "saldo_propio": float(f["saldo_propio"]), "columnas": cols, "verificacion": verificacion,
+                })
+            return {"filas": resultado, "columnas": columnas_todas}
+    finally:
+        conn.close()
+
 @app.get("/efecto_patrimonial")
 def get_efecto_patrimonial(id_cuenta: int, fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
     """Asiento sintetizado — TODAS las líneas de TODOS los asientos que tocan esta cuenta,
