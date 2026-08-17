@@ -756,7 +756,7 @@ def get_tipos_comprobante():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, descripcion, exige_iva FROM tipos_comprobante WHERE activo=true ORDER BY id")
+            cur.execute("SELECT id, descripcion, exige_iva, es_nota_credito FROM tipos_comprobante WHERE activo=true ORDER BY id")
             return cur.fetchall()
     finally:
         conn.close()
@@ -768,7 +768,7 @@ def get_tipos_comprobante_admin():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, descripcion, activo, exige_iva FROM tipos_comprobante ORDER BY id")
+            cur.execute("SELECT id, descripcion, activo, exige_iva, es_nota_credito FROM tipos_comprobante ORDER BY id")
             return cur.fetchall()
     finally:
         conn.close()
@@ -777,6 +777,7 @@ class TipoComprobanteIn(BaseModel):
     descripcion: str
     activo: Optional[bool] = True
     exige_iva: Optional[bool] = False
+    es_nota_credito: Optional[bool] = False
 
 @app.post("/tipos_comprobante")
 def crear_tipo_comprobante(t: TipoComprobanteIn):
@@ -785,8 +786,8 @@ def crear_tipo_comprobante(t: TipoComprobanteIn):
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(MAX(id), 0) + 1 AS siguiente FROM tipos_comprobante")
             siguiente_id = cur.fetchone()["siguiente"]
-            cur.execute("INSERT INTO tipos_comprobante (id, descripcion, activo, exige_iva) VALUES (%s, %s, %s, %s)",
-                        (siguiente_id, t.descripcion, t.activo, t.exige_iva))
+            cur.execute("INSERT INTO tipos_comprobante (id, descripcion, activo, exige_iva, es_nota_credito) VALUES (%s, %s, %s, %s, %s)",
+                        (siguiente_id, t.descripcion, t.activo, t.exige_iva, t.es_nota_credito))
         conn.commit()
         return {"ok": True, "id": siguiente_id}
     finally:
@@ -797,8 +798,8 @@ def actualizar_tipo_comprobante(id: int, t: TipoComprobanteIn):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE tipos_comprobante SET descripcion=%s, activo=%s, exige_iva=%s WHERE id=%s",
-                        (t.descripcion, t.activo, t.exige_iva, id))
+            cur.execute("UPDATE tipos_comprobante SET descripcion=%s, activo=%s, exige_iva=%s, es_nota_credito=%s WHERE id=%s",
+                        (t.descripcion, t.activo, t.exige_iva, t.es_nota_credito, id))
         conn.commit()
         return {"ok": True}
     finally:
@@ -994,12 +995,13 @@ def _crear_comprobante(cur, c: ComprobanteIn):
     cuenta_gasto = c.cuenta_gasto_override or row_titular.get("nivel4")
 
     lineas_asiento = []
-    # Notas de Crédito (A/B/C — IDs 3, 8, 13) van al revés de una Factura: el proveedor te
-    # devuelve, entonces baja la deuda (Debe Proveedores) y baja el gasto (Haber Gasto/IVA), en
-    # vez de subir. Se identifica por ID de tipos_comprobante — nunca por texto ("Nota de
-    # Crédito A"), justo para que renombrar un tipo de comprobante no rompa esto en silencio.
-    NOTAS_CREDITO_IDS = {3, 8, 13}
-    es_nota_credito = c.id_tipo_comprobante in NOTAS_CREDITO_IDS
+    # Nota de Crédito va al revés de una Factura: el proveedor te devuelve, entonces baja la
+    # deuda (Debe Proveedores) y baja el gasto (Haber Gasto/IVA), en vez de subir. Se consulta
+    # tipos_comprobante.es_nota_credito (configurable en Admin) — nunca un ID fijo en código
+    # ni el texto del comprobante, para que crear/renombrar un tipo no rompa esto en silencio.
+    cur.execute("SELECT es_nota_credito FROM tipos_comprobante WHERE id = %s", (c.id_tipo_comprobante,))
+    fila_tipo = cur.fetchone()
+    es_nota_credito = bool(fila_tipo and fila_tipo["es_nota_credito"])
     def _linea(cuenta, monto_debe, monto_haber, desc):
         return (cuenta, monto_haber, monto_debe, desc) if es_nota_credito else (cuenta, monto_debe, monto_haber, desc)
     monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
