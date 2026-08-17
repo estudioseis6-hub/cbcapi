@@ -3826,10 +3826,10 @@ def get_balance_comprobacion(fecha_desde: Optional[str] = None, fecha_hasta: Opt
 
 @app.get("/efecto_patrimonial")
 def get_efecto_patrimonial(id_cuenta: int, fecha_desde: Optional[str] = None, fecha_hasta: Optional[str] = None):
-    """Para UNA cuenta de Resultados (ej. "Frutas y Verduras"), muestra contra qué cuentas
-    Patrimoniales fue cada movimiento — cuánto terminó en Proveedores a Pagar, cuánto en
-    Efectivo, etc. — agrupado por la cuenta del otro lado de cada asiento, no la lista plana
-    de líneas de la cuenta en sí (eso ya lo hace Mayor por Cuenta)."""
+    """Asiento sintetizado — TODAS las líneas de TODOS los asientos que tocan esta cuenta,
+    agrupadas por cuenta (incluida ella misma), como si fuera un único asiento resumen. Debe
+    y Haber, sumados, tienen que dar exactamente igual — es la síntesis de todos los
+    movimientos de esta cuenta a lo largo del tiempo, en un solo "asiento" imaginario."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -3841,8 +3841,18 @@ def get_efecto_patrimonial(id_cuenta: int, fecha_desde: Optional[str] = None, fe
             if fecha_hasta:
                 where.append("a.fecha <= %s")
                 params.append(fecha_hasta)
-            # Para cada asiento que toca esta cuenta, se buscan las OTRAS líneas del mismo
-            # asiento (el otro lado de la partida doble) y se agrupan por esa cuenta.
+            # 1) La cuenta elegida, con su propio Debe/Haber total.
+            cur.execute(f"""
+                SELECT p.id, p.nombre AS cuenta, p.niv1_desc, p.niv2_desc,
+                       COALESCE(SUM(al.debe), 0) AS total_debe, COALESCE(SUM(al.haber), 0) AS total_haber
+                FROM asiento_lineas al
+                JOIN asientos a ON a.id = al.id_asiento
+                JOIN plan_de_cuentas p ON p.id = al.id_cuenta
+                WHERE {" AND ".join(where)}
+                GROUP BY p.id, p.nombre, p.niv1_desc, p.niv2_desc
+            """, params)
+            propia = cur.fetchone()
+            # 2) Las cuentas del OTRO lado de cada uno de esos asientos.
             cur.execute(f"""
                 SELECT p2.id, p2.nombre AS cuenta, p2.niv1_desc, p2.niv2_desc,
                        SUM(al2.debe) AS total_debe, SUM(al2.haber) AS total_haber
@@ -3854,7 +3864,11 @@ def get_efecto_patrimonial(id_cuenta: int, fecha_desde: Optional[str] = None, fe
                 GROUP BY p2.id, p2.nombre, p2.niv1_desc, p2.niv2_desc
                 ORDER BY (SUM(al2.debe) + SUM(al2.haber)) DESC
             """, params)
-            return cur.fetchall()
+            otras = cur.fetchall()
+            filas = ([propia] if propia else []) + otras
+            total_debe = round(sum(float(f["total_debe"] or 0) for f in filas), 2)
+            total_haber = round(sum(float(f["total_haber"] or 0) for f in filas), 2)
+            return {"filas": filas, "total_debe": total_debe, "total_haber": total_haber}
     finally:
         conn.close()
 
