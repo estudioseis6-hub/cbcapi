@@ -959,7 +959,7 @@ def _crear_comprobante(cur, c: ComprobanteIn):
     la carga masiva, sin duplicar la lógica del asiento."""
     fecha = date.fromisoformat(c.fecha)
     fecha_compra = date.fromisoformat(c.fecha_compra) if c.fecha_compra else fecha
-    es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) > 0)
+    es_informal = (c.id_tipo_comprobante == 995) or ((c.sin_factura or 0) != 0)
     num_norm = _solo_digitos(c.numero_comprobante)
     if num_norm:
         cur.execute("""
@@ -1002,22 +1002,32 @@ def _crear_comprobante(cur, c: ComprobanteIn):
     cur.execute("SELECT es_nota_credito FROM tipos_comprobante WHERE id = %s", (c.id_tipo_comprobante,))
     fila_tipo = cur.fetchone()
     es_nota_credito = bool(fila_tipo and fila_tipo["es_nota_credito"])
-    def _linea(cuenta, monto_debe, monto_haber, desc):
-        return (cuenta, monto_haber, monto_debe, desc) if es_nota_credito else (cuenta, monto_debe, monto_haber, desc)
+    def _linea(cuenta, monto, desc):
+        # El signo del monto decide la dirección, combinado con si el TIPO ya es Nota de
+        # Crédito (XOR) — así un ajuste "Sin Factura" cargado en negativo invierte solo,
+        # con el mismo tipo de comprobante de siempre, sin necesitar crear uno aparte para
+        # "aumenta" y otro para "disminuye".
+        monto_abs = abs(monto)
+        invertir = es_nota_credito != (monto < 0)
+        return (cuenta, 0, monto_abs, desc) if invertir else (cuenta, monto_abs, 0, desc)
     monto_gasto = (c.subtotal or 0) + (c.exento or 0) + (c.sin_factura or 0)
     if cuenta_gasto and monto_gasto:
-        lineas_asiento.append(_linea(cuenta_gasto, monto_gasto, 0, c.descripcion))
+        lineas_asiento.append(_linea(cuenta_gasto, monto_gasto, c.descripcion))
     monto_iva = (c.iva_105 or 0) + (c.iva_21 or 0) + (c.iva_27 or 0)
     if monto_iva:
-        lineas_asiento.append(_linea(_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "IVA_CREDITO_FISCAL"), monto_iva, c.descripcion))
     if c.perc_iva:
-        lineas_asiento.append(_linea(_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "PERCEPCION_IVA"), c.perc_iva, c.descripcion))
     if c.perc_iibb:
-        lineas_asiento.append(_linea(_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "PERCEPCION_IIBB"), c.perc_iibb, c.descripcion))
     if c.perc_otras:
-        lineas_asiento.append(_linea(_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, 0, c.descripcion))
+        lineas_asiento.append(_linea(_cuenta(cur, "OTRAS_PERCEPCIONES"), c.perc_otras, c.descripcion))
     if cuenta_pasivo and importe:
-        lineas_asiento.append(_linea(cuenta_pasivo, 0, importe, c.descripcion))
+        # La contrapartida (la deuda) va siempre invertida respecto de la línea de gasto de
+        # arriba — mismo criterio de signo, dado vuelta.
+        monto_abs = abs(importe)
+        invertir = es_nota_credito != (importe < 0)
+        lineas_asiento.append((cuenta_pasivo, monto_abs, 0, c.descripcion) if invertir else (cuenta_pasivo, 0, monto_abs, c.descripcion))
 
     id_asiento = _crear_asiento(cur, "COMPROBANTE", f"Factura {c.numero_comprobante} — {c.descripcion}", fecha_compra)
     if lineas_asiento:
@@ -3887,6 +3897,23 @@ def get_matriz_trazabilidad(fecha_desde: Optional[str] = None, fecha_hasta: Opti
                 columnas_por_fila.setdefault(c["id_fila"], {})[c["columna"]] = float(c["monto"])
                 orden_columna[c["columna"]] = (c["col_niv2"], c["col_niv3"], c["col_niv4"])
             columnas_todas = sorted({c["columna"] for c in cruces if c["columna"]}, key=lambda c: orden_columna[c])
+            # Saldo actual REAL de cada rubro (todo el historial, sin filtro de fecha) — para
+            # dar contexto de "cuánto queda pendiente hoy" en esa cuenta, aclarando que es el
+            # saldo de la cuenta en general, no exclusivo de estas filas (una cuenta como
+            # "Proveedores a Pagar" la comparten muchos gastos distintos, y una vez pagada no
+            # se puede separar retroactivamente "esto es de este gasto puntual").
+            saldos_actuales = {}
+            if columnas_todas:
+                cur.execute("""
+                    SELECT p2.niv4_desc AS columna, SUM(al2.debe - al2.haber) AS saldo_actual
+                    FROM asiento_lineas al2
+                    JOIN asientos a2 ON a2.id = al2.id_asiento AND a2.anulado = false
+                    JOIN plan_de_cuentas p2 ON p2.id = al2.id_cuenta AND p2.niv1_desc = 'Patrimonial'
+                    WHERE p2.niv4_desc = ANY(%s)
+                    GROUP BY p2.niv4_desc
+                """, (columnas_todas,))
+                for r in cur.fetchall():
+                    saldos_actuales[r["columna"]] = float(r["saldo_actual"])
             resultado = []
             for f in filas:
                 cols = columnas_por_fila.get(f["id"], {})
@@ -3895,7 +3922,7 @@ def get_matriz_trazabilidad(fecha_desde: Optional[str] = None, fecha_hasta: Opti
                     "id": f["id"], "cuenta": f["cuenta"], "niv1_desc": f["niv1_desc"], "niv2_desc": f["niv2_desc"],
                     "saldo_propio": float(f["saldo_propio"]), "columnas": cols, "verificacion": verificacion,
                 })
-            return {"filas": resultado, "columnas": columnas_todas}
+            return {"filas": resultado, "columnas": columnas_todas, "saldos_actuales": saldos_actuales}
     finally:
         conn.close()
 
