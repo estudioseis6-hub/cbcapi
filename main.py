@@ -1063,6 +1063,12 @@ def _crear_comprobante(cur, c: ComprobanteIn):
                 cfg = cur.fetchone()
                 if cfg and cfg["valor"]:
                     id_fondo = int(cfg["valor"])
+            # Si tampoco hay config general, mismo respaldo final que ya tiene el camino
+            # informal — cualquier Banco activo, antes que romper la carga sin ofrecer nada.
+            if not id_fondo:
+                cur.execute("SELECT id FROM fondos WHERE tipo = 'Banco' AND moneda = 'ARS' AND activo = true ORDER BY id LIMIT 1")
+                r = cur.fetchone()
+                id_fondo = r["id"] if r else None
     if not id_fondo:
         return {"ok": False, "sin_fondo": True}
     plazo = None
@@ -3844,7 +3850,9 @@ def get_matriz_trazabilidad(fecha_desde: Optional[str] = None, fecha_hasta: Opti
                 where.append("a.fecha <= %s")
                 params.append(fecha_hasta)
             filtro = " AND ".join(where)
-            # 1) Cada fila (cuenta de Resultados o Movimiento) con su propio saldo.
+            # 1) Cada fila (cuenta de Resultados o Movimiento) con su propio saldo — ordenada
+            # por los códigos numéricos de Nivel 2/3/4 (el mismo orden que usa Balance), no
+            # alfabético.
             cur.execute(f"""
                 SELECT p1.id, p1.nombre AS cuenta, p1.niv1_desc, p1.niv2_desc,
                        SUM(al.debe - al.haber) AS saldo_propio
@@ -3852,14 +3860,17 @@ def get_matriz_trazabilidad(fecha_desde: Optional[str] = None, fecha_hasta: Opti
                 JOIN asientos a ON a.id = al.id_asiento
                 JOIN plan_de_cuentas p1 ON p1.id = al.id_cuenta
                 WHERE p1.niv1_desc IN ('Resultados', 'Movimiento') AND {filtro}
-                GROUP BY p1.id, p1.nombre, p1.niv1_desc, p1.niv2_desc
+                GROUP BY p1.id, p1.nombre, p1.niv1_desc, p1.niv2_desc, p1.niv2, p1.niv3, p1.niv4, p1.niv5
                 HAVING SUM(al.debe - al.haber) != 0
-                ORDER BY p1.niv1_desc, p1.niv2_desc, p1.nombre
+                ORDER BY p1.niv2, p1.niv3, p1.niv4, p1.niv5, p1.nombre
             """, params)
             filas = cur.fetchall()
-            # 2) Para cada fila, cuánto fue a cada rubro (Nivel 4) Patrimonial del otro lado.
+            # 2) Para cada fila, cuánto fue a cada rubro (Nivel 4) Patrimonial del otro lado —
+            # con el código de Nivel 2/3/4 de ESE rubro, para poder ordenar las columnas
+            # también en el orden real de Balance (Activo primero, después Pasivos, etc.).
             cur.execute(f"""
                 SELECT al.id_cuenta AS id_fila, p2.niv4_desc AS columna,
+                       MIN(p2.niv2) AS col_niv2, MIN(p2.niv3) AS col_niv3, MIN(p2.niv4) AS col_niv4,
                        SUM(al2.debe - al2.haber) AS monto
                 FROM asiento_lineas al
                 JOIN asientos a ON a.id = al.id_asiento
@@ -3871,9 +3882,11 @@ def get_matriz_trazabilidad(fecha_desde: Optional[str] = None, fecha_hasta: Opti
             """, params)
             cruces = cur.fetchall()
             columnas_por_fila = {}
+            orden_columna = {}
             for c in cruces:
                 columnas_por_fila.setdefault(c["id_fila"], {})[c["columna"]] = float(c["monto"])
-            columnas_todas = sorted({c["columna"] for c in cruces if c["columna"]})
+                orden_columna[c["columna"]] = (c["col_niv2"], c["col_niv3"], c["col_niv4"])
+            columnas_todas = sorted({c["columna"] for c in cruces if c["columna"]}, key=lambda c: orden_columna[c])
             resultado = []
             for f in filas:
                 cols = columnas_por_fila.get(f["id"], {})
