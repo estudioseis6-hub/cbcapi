@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import pathlib
 import json
 load_dotenv(dotenv_path=pathlib.Path(__file__).parent / ".env")
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -999,9 +999,20 @@ def _crear_comprobante(cur, c: ComprobanteIn):
     # deuda (Debe Proveedores) y baja el gasto (Haber Gasto/IVA), en vez de subir. Se consulta
     # tipos_comprobante.es_nota_credito (configurable en Admin) — nunca un ID fijo en código
     # ni el texto del comprobante, para que crear/renombrar un tipo no rompa esto en silencio.
-    cur.execute("SELECT es_nota_credito FROM tipos_comprobante WHERE id = %s", (c.id_tipo_comprobante,))
+    cur.execute("SELECT es_nota_credito, admite_negativos FROM tipos_comprobante WHERE id = %s", (c.id_tipo_comprobante,))
     fila_tipo = cur.fetchone()
     es_nota_credito = bool(fila_tipo and fila_tipo["es_nota_credito"])
+    admite_negativos = bool(fila_tipo and fila_tipo["admite_negativos"])
+    # Solo el tipo "Ajuste" (admite_negativos=true en Admin) puede llevar montos negativos —
+    # para cualquier otro tipo, un negativo cargado (típicamente un error de tipeo, o un "-"
+    # que se pegó de Excel sin querer) rompería el asiento en silencio si se dejara pasar, así
+    # que se bloquea acá con un error claro, antes de tocar la base.
+    if not admite_negativos:
+        for campo, valor in [("subtotal", c.subtotal), ("exento", c.exento), ("iva_105", c.iva_105),
+                              ("iva_21", c.iva_21), ("iva_27", c.iva_27), ("perc_iva", c.perc_iva),
+                              ("perc_iibb", c.perc_iibb), ("perc_otras", c.perc_otras), ("sin_factura", c.sin_factura)]:
+            if valor is not None and valor < 0:
+                raise HTTPException(status_code=400, detail=f"Este tipo de comprobante no admite montos negativos (campo '{campo}'). Usá el tipo 'Ajuste' para eso.")
     def _linea(cuenta, monto, desc):
         # El signo del monto decide la dirección, combinado con si el TIPO ya es Nota de
         # Crédito (XOR) — así un ajuste "Sin Factura" cargado en negativo invierte solo,
