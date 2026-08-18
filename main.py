@@ -1532,9 +1532,20 @@ def registrar_pago_parcial(p: PagoParcialIn):
                 # completo. Si se revierte, la proyección se recrea tal cual estaba.
                 if proyectado:
                     cur.execute("DELETE FROM cashflow WHERE id = %s", (proyectado["id"],))
+                    # Los valores que vienen directo de la base (fecha, importe) tienen tipos
+                    # que json.dumps no puede convertir solo (date, Decimal) — se normalizan acá
+                    # antes de guardarlos, sino _set_reversion se rompe en silencio más abajo.
+                    campos_serializables = {}
+                    for k, v in proyectado.items():
+                        if hasattr(v, "isoformat"):
+                            campos_serializables[k] = v.isoformat()
+                        elif hasattr(v, "__float__") and not isinstance(v, (int, float, bool)):
+                            campos_serializables[k] = float(v)
+                        else:
+                            campos_serializables[k] = v
                     reversion_acciones.append({
                         "tabla": "cashflow", "where_columna": "id", "where_valor": None, "tipo": "INSERT",
-                        "campos": {k: v for k, v in proyectado.items()},
+                        "campos": campos_serializables,
                     })
                 cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = %s", (id_cashflow_pago, p.id_operacion))
             elif proyectado:
