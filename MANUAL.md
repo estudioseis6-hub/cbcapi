@@ -1,5 +1,4 @@
 # MANUAL — CBC Sistema Contable
-
 **Cómo se administra este documento:** vive en GitHub, repo `cbcapi`, en la raíz (al lado de `main.py`). Se edita ahí mismo. Al empezar una sesión nueva con Claude, se sube este archivo antes de pedir cualquier cosa.
 
 ---
@@ -7,7 +6,6 @@
 # PARTE 1 — GUÍA FUNCIONAL (paso a paso, qué hace cada cosa)
 
 ## Recorrido general del sistema
-
 El sistema arranca en la pantalla **Inicio**, que tiene los links a todo lo demás. Lo primero que
 hay que hacer, siempre, es ir a **Configuración** y completar lo que el sistema pida ahí (datos de
 la empresa, convenio laboral, fecha de corte patrimonial, etc.) — varias pantallas no dejan
@@ -18,11 +16,11 @@ Después de Configuración, el orden natural de uso es:
 2. **Tesorería** — el día a día de ingresos y egresos de plata.
 3. **Cuenta Corriente** — la deuda con Proveedores/Titulares, y el pago de facturas.
 4. **Balance** — la foto contable completa: Resultados y Situación Patrimonial, más la carga inicial (Saldos Iniciales, Cheques de Apertura).
+5. **Dashboard** (nuevo, 19-8-2026) — panorama visual rápido, arranca chico.
 
 ---
 
 ## TESORERÍA — cómo funciona, paso a paso
-
 En Tesorería se cargan y se ven todos los ingresos y egresos de plata, organizados por **Fondo**
 (cada caja, cada cuenta bancaria es un Fondo separado). Todo lo que cargás acá modifica el saldo
 del Fondo que elegiste — nunca "la plata en general", siempre un fondo puntual.
@@ -73,10 +71,8 @@ dos juntos**, para que nunca quede una transferencia con solo una mitad registra
 ---
 
 ## CUENTA CORRIENTE — cómo funciona, paso a paso
-
 Acá vive la deuda con Proveedores y otros Titulares — y es donde se registra el pago. Hay una
 distinción importante que separa todo el circuito en dos caminos, según el Titular:
-
 - **Titular con "genera cuenta corriente" activado** (proveedores habituales, con seguimiento de
   deuda en el tiempo): la factura se carga **acá, en Cuenta Corriente**, con percepciones
   impositivas (IVA, IIBB, otras) si corresponde.
@@ -91,6 +87,23 @@ percepciones si corresponde.
 - **Qué le hace al Balance:** genera una deuda — el Pasivo del Titular sube. Queda en estado **IMPAGO**.
 - No mueve ninguna Caja/Banco todavía — es solo el reconocimiento de que se debe.
 
+**1.b. Nota de Crédito / Ajuste — el mismo comprobante, la deuda va al revés (nuevo, 19-8-2026)**
+Cualquier tipo de comprobante puede marcarse en Admin → Tipos de Comprobante con dos casilleros
+independientes:
+- **"Es Nota de Crédito"**: invierte el asiento entero — baja la deuda y baja el gasto, en vez de
+  subirlos. Se usa para Notas de Crédito formales (proveedor te devuelve algo).
+- **"Admite montos negativos"**: solo el tipo **"Ajuste"** (creado hoy, id 1001) lo tiene tildado.
+  Con este tipo, cargás **cualquier importe** (subtotal, "Sin Factura", lo que sea) en **positivo
+  para subir** la deuda del Titular, o en **negativo para bajarla** — sin necesitar un segundo tipo
+  de comprobante separado. Para cualquier OTRO tipo (Factura A, S/F, etc.), un monto negativo se
+  **rechaza con un error claro** ("Este tipo de comprobante no admite montos negativos... Usá el
+  tipo 'Ajuste' para eso") — antes de esto, un negativo colado por error (tipeo, o un "-" pegado de
+  Excel) podía romper el asiento en silencio.
+- **"S/F" (Sin Factura, tipo 995) queda reservado** para compras/ventas informales reales — no se
+  usa más para ajustes de saldo (eso es trabajo de "Ajuste" ahora).
+- **Gastos exentos que no son compras** (ej. Cargas Sociales, algo sin IVA): usar un tipo de
+  comprobante nuevo tipo "Exento" (id 1000, ya existía), sin "Exige IVA" tildado.
+
 **2. Registrar Pago** — se eligen una o varias facturas IMPAGAS de un Titular y se marcan como
 pagadas, junto con el medio de pago:
 - **TD (Transferencia Directa):** el pago sale ya, de un Fondo elegido (Caja o Banco).
@@ -100,8 +113,22 @@ pagadas, junto con el medio de pago:
   - **Qué le hace al Balance:** la deuda con el Proveedor se cancela (pasa a PAGO) pero se
     **reemplaza** por una deuda de "Valores Emitidos — Cheques Pendientes" hasta la fecha de
     vencimiento del cheque, donde recién ahí sale la plata de verdad del Fondo.
+- **Pago Parcial:** si seleccionás UNA sola factura, podés pagar menos del total — el saldo restante
+  queda proyectado en Tesorería, listo para completarse con otro pago después. Funciona tanto para
+  TD como para ECheq. Cada aplicación queda en la tabla `aplicaciones_pago` (factura + pago + cuánto cubrió).
 - **Ojo:** las operaciones marcadas como "informales" (sin factura) solo se pueden pagar en
   efectivo, no con ECheq.
+
+**3. Eliminar un Titular (nuevo, 19-8-2026)** — desde la pantalla propia de Titulares, botón
+"Eliminar" en cada fila, con confirmación. El sistema **bloquea el borrado** si ese Titular tiene
+comprobantes en Cuenta Corriente o movimientos en Tesorería asociados — para no romper el
+historial. Solo se puede eliminar un Titular que nunca se usó.
+
+### "Saldo a fecha" en Saldos Pendientes (nuevo, 19-8-2026)
+Además del filtro por Estado, hay un campo **"Saldo a fecha"** (vacío = hoy) — si le ponés una
+fecha, te muestra el saldo pendiente **tal como estaba ese día**: solo cuenta facturas que ya
+existían y pagos que ya se habían aplicado hasta esa fecha, ignorando lo posterior. Sirve para
+comparar ese número directo contra el Balance de un mes puntual.
 
 ### Si un pago se elimina desde Tesorería
 Si en Tesorería se elimina un movimiento que había sido un pago TD, las facturas que ese pago
@@ -112,7 +139,6 @@ ven afectadas.
 ---
 
 ## RRHH y LIQUIDACIONES — cómo funciona, paso a paso
-
 ### Escala Convenio y Sueldos por Categoría
 Acá se cargan los mínimos y estándares salariales, mes a mes, por Categoría (convenio) o Posición
 (real). Si un mes no tiene carga propia, el sistema **arrastra automáticamente** el último mes
@@ -145,11 +171,36 @@ Por cada empleado, cada mes, hay dos "circuitos" (Formal y Real) que se calculan
 ---
 
 ## BALANCE — cómo funciona, paso a paso
-
 Balance tiene dos partes que se ven juntas pero son independientes: el **Cuadro de Resultados**
 (Ventas, Gastos, Ganancia/Pérdida del período) y el **Estado de Situación Patrimonial** (Activo,
 Pasivo, Patrimonio Neto). Además, acá vive la carga de **Saldos Iniciales** y **Cheques de
 Apertura** — la foto de "cómo empezaba todo" el día del corte.
+
+Balance ahora tiene varias pestañas (arriba, junto a "Balance"):
+
+### Cheques de Apertura / Cheques Pendientes
+Como ya estaba — cheques emitidos antes del corte (Apertura) o que salieron de Tesorería/Cuenta
+Corriente y todavía no se debitaron (Pendientes).
+
+### Mayor por Fondo (traído de un archivo aparte, 19-8-2026)
+Planilla de Ingresos y Egresos agrupada por Cuenta contable, repartida en 4 columnas de Fondo
+(EFVO $, Cuentas $, EFVO USD, Cuentas USD) — vivía en un archivo separado (`MayorPorFondo.js`,
+también en el menú principal), ahora está también acá para tener todo junto.
+
+### Mayor por Cuenta (nuevo, 19-8-2026) — "asiento sintetizado"
+Buscás una cuenta puntual (con autocompletado), y te arma el **asiento sintetizado**: todas las
+líneas de todos los asientos que tocaron esa cuenta, agrupadas por la cuenta del otro lado (Debe
+o Haber según corresponda) — como si fuera un único asiento resumen de toda la historia de esa
+cuenta. Arriba, un cartel confirma que Total Debe = Total Haber (si no coincide, hay algo mal
+conectado en esa cuenta puntual).
+- **Limitación importante, para no confundirse:** solo muestra movimientos donde una cuenta de
+  **Resultados** (un gasto) participó directamente. Un **pago** (Patrimonial contra Patrimonial —
+  ej. Efectivo cancelando una deuda vieja) **no aparece acá**, porque en ese asiento no participa
+  ninguna cuenta de Resultados. No es un error, es el alcance de la herramienta. Debajo de cada
+  columna hay un número chico "hoy: $X" — el saldo **actual real** de esa cuenta patrimonial
+  (incluye pagos posteriores), aclarando que es el saldo de la cuenta en general, no exclusivo de
+  esa fila (varios gastos distintos pueden compartir la misma cuenta patrimonial).
+- Tiene un buscador de rango de fechas, con persistencia (se acuerda de lo último elegido).
 
 ### Saldos Iniciales
 Cada cuenta del Balance (Activo o Pasivo) tiene una celda donde se carga su valor de apertura con
@@ -172,21 +223,30 @@ Cheques que la empresa ya había emitido antes del corte, y que todavía no se d
 - **Estado Debitado:** ya salió la plata del banco — deja de contar como deuda pendiente.
 
 ### El mecanismo de "Asiento"
-Cada vez que se carga algo que afecta el Balance (por ahora: Saldos Iniciales, movimientos de
-Tesorería, transferencias entre fondos), el sistema crea por adentro un **Asiento** — un recibo
-con su propio número, que dice qué tipo de carga fue y cuándo se hizo. Si después hace falta
-deshacer esa carga porque fue un error, el sistema anula el Asiento completo (no borra nada a lo
-bruto) — queda constancia de que existió y se dio de baja, en vez de desaparecer sin dejar rastro.
+Cada vez que se carga algo que afecta el Balance, el sistema crea por adentro un **Asiento** — un
+recibo con su propio número, que dice qué tipo de carga fue y cuándo se hizo. Si después hace
+falta deshacer esa carga porque fue un error, el sistema anula el Asiento completo (no borra nada
+a lo bruto) — queda constancia de que existió y se dio de baja, en vez de desaparecer sin dejar
+rastro.
 
-**Todavía no todo pasa por acá** — Comprobantes/Facturas y Registrar Pago (los más importantes)
-todavía no generan su Asiento propio. Ver Parte 3, Prioridad 1.
+---
+
+## DASHBOARD — nuevo, 19-8-2026, primer ensayo
+Pantalla nueva, fondo oscuro (misma paleta que Balance: #0D1B2A / #132436 / #1B263B), pensada
+para arrancar chica e ir creciendo. Por ahora tiene:
+- 3 tarjetas: Ventas del mes, Gastos del mes, Resultado neto.
+- Un gráfico de barras horizontal (hecho con `div`s simples, **sin ninguna librería externa de
+  gráficos** — a propósito, para no arriesgar que el build falle si esa librería no está
+  instalada en el proyecto real) — cada rubro del Cuadro de Resultados, verde apagado los
+  ingresos, terracota apagado los gastos.
+- Selector Mes/Rango, mismo patrón que Balance y Mayor por Fondo, con persistencia.
+- Fuente de datos: mismo endpoint que usa Balance (`/balance_unificado`).
 
 ---
 
 # PARTE 2 — REFERENCIA TÉCNICA (arquitectura, para Claude y para ir aprendiendo)
 
 ## Arquitectura
-
 | Capa | Tecnología | Dónde vive |
 |---|---|---|
 | Frontend | React | repo `cbcfront`, Vercel |
@@ -197,32 +257,45 @@ todavía no generan su Asiento propio. Ver Parte 3, Prioridad 1.
 - Para bajar TODO un repo de una vez: botón verde "Code" → "Download ZIP".
 - Render no siempre redeploya solo. Vercel sí, pero el navegador cachea fuerte (Ctrl+Shift+R antes de asumir un bug).
 - Números: separador de miles + 1 decimal, siempre, en todo el sistema.
+- **Regla nueva de hoy:** ninguna pantalla nueva debería sumar una librería npm que no se confirmó
+  que ya esté instalada en el proyecto real — un `import` de algo no instalado rompe el build
+  entero en Vercel, y el síntoma es confuso (la pantalla nueva no aparece, todo lo demás sigue
+  andando con la versión vieja cacheada). Preferir siempre `div`s/CSS puro para gráficos simples,
+  salvo que se confirme antes que la librería ya está en `package.json`.
 
 ## Mapa de archivos del frontend (`cbcfront/src`)
-
 | Archivo | Qué es |
 |---|---|
 | `App.js` | Layout, navegación, bloqueo de pantallas si falta configuración |
 | `Inicio.js` | Pantalla de bienvenida |
+| `Dashboard.js` | **Nuevo (19-8-2026).** Panorama visual, fondo oscuro, arranca con Cuadro de Resultados |
 | `Configuracion.jsx` | Datos de empresa, convenio, corte, checklist |
 | `RRHH.jsx` | Empleados, Escala Convenio, Sueldos por Categoría, Liquidaciones, Conceptos de Liquidación |
-| `Balance.js` | Cuadro de Resultados + Situación Patrimonial + Saldos Iniciales + Cheques de Apertura |
-| `Titulares.js` | Alta/edición de Proveedores y clientes |
+| `Balance.js` | Cuadro de Resultados + Situación Patrimonial + Saldos Iniciales + Cheques de Apertura + Mayor por Fondo + Mayor por Cuenta |
+| `Titulares.jsx` | Alta/edición/eliminación de Proveedores y clientes — pantalla completa, única fuente (ya no hay una copia reducida en ningún otro lado) |
 | `PlanCuentas.js` | Asignar un Fondo a cada cuenta del Plan de Cuentas |
 | `Fondos.js` | Alta/edición de Fondos (caja/banco) |
 | `CargarMovimiento.js` | "Cargar Comprobante" — factura simple, para titulares sin cuenta corriente |
-| `CuentaCorriente.js` | Deuda por Titular, carga de facturas con percepciones, Registrar Pago |
+| `CuentaCorriente.js` | Deuda por Titular, carga de facturas con percepciones, Registrar Pago (TD/ECheq/Parcial), Saldo a fecha |
 | `GestionSaldos.js` | Vista de consulta de operaciones (solo lectura) |
 | `Tesoreria.js` | Movimientos de caja/banco, transferencias, confirmar vencimientos |
-| `Admin.js` | Gestión directa del Plan de Cuentas (niveles, estructura) |
+| `Admin.js` | Gestión del Plan de Cuentas (con filtros por los 6 niveles), Tipos de Comprobante (con Exige IVA / Es Nota de Crédito / Admite Negativos), Cheques Pendientes, Manual. Ya NO tiene pestaña de Titulares (era una copia redundante e inferior a la pantalla propia). |
+| `CargaMasiva.js` | Carga masiva de facturas/movimientos pegados desde Excel — `normalizarImporte` corregida (ver Parte 2, bugs de hoy) |
+| `MayorPorFondo.js` | Archivo original (ahora también incluido dentro de `Balance.js`) |
 | `CircuitoF.js` | **De Tomy — no tocar sin que él lo pida.** |
 | `CargaAutomatica.js` | **De Tomy — no tocar sin que él lo pida.** Lectura automática de facturas. |
 
 ## Niveles del Plan de Cuentas
 - **Nivel 1**: 3 valores en todo el sistema — "Resultados", "Patrimonial", "Movimiento".
 - **Nivel 2**: dentro de Resultados → Ventas, Deducciones Variables, Gastos. Dentro de Patrimonial → Activo, Pasivo, Patrimonio. Dentro de Movimiento → Mov. Fondos.
-- **Nivel 3, 4**: subdivisiones cada vez más finas.
-- **Nivel 5**: cuentas puntuales, la hoja final del árbol.
+- **Nivel 3, 4, 5**: subdivisiones cada vez más finas.
+- **Nivel 6**: la cuenta puntual, la hoja final del árbol — coincide siempre con el campo `nombre` (confirmado por SQL, 197 de 201 cuentas exactas, las otras 4 eran inconsistencias de tipeo ya corregidas). No cumple ninguna función propia distinta del nombre — se mantiene por si algún día se usa para diferenciar de verdad.
+
+## Admin → Plan de Cuentas: filtros por los 6 niveles (19-8-2026)
+Fila de 6 desplegables (Nivel 1 a 6), en cascada — cada uno solo muestra las opciones que existen
+dentro de lo ya elegido arriba. Ancho fijo (150px cada uno) con scroll horizontal si hace falta,
+para que nunca se rompa el ancho general de la pantalla (ver bug de `minWidth: 0` en Parte 2 más
+abajo).
 
 ## Detalles técnicos de Liquidaciones
 - Jornada completa = 192 horas mensuales. Todo prorratea linealmente salvo Obra Social (excepción explicada en Parte 1).
@@ -230,174 +303,223 @@ todavía no generan su Asiento propio. Ver Parte 3, Prioridad 1.
 - `liquidaciones.es_borrador`: `true` = "Guardar Cambios" (sin bloqueos). `false` = "Liquidar" (cierra el mes). No puede volver a `true` por accidente una vez `false`.
 - Suma No Remunerativa: de Escala Convenio, prorrateada, se suma al Neto después de Aportes (no infla Bruto ni la base de Aportes).
 
-## Detalles técnicos de Balance — REESCRITO POR COMPLETO (arquitectura nueva)
-**Todo lo anterior sobre `EstadoResultados`/`BloquePatrimonial` separados, `saldos_genericos`, y listas hardcodeadas de nombres de cuenta quedó viejo — se tiró abajo.** El Balance de hoy funciona así:
+## Detalles técnicos de Balance
+- **Una sola fuente de verdad: `asiento_lineas`.** El Balance lee un único endpoint,
+  `/balance_unificado?mes=X&anio=Y` (o `fecha_desde`/`fecha_hasta` para rangos largos), que suma
+  `debe - haber` de `asiento_lineas` (uniendo con `asientos` para descartar los anulados),
+  agrupado por `id_cuenta` (no por nombre de texto).
+- Devuelve, por cada cuenta: `periodo` (movimiento solo de ese mes — Resultados) y `acumulado`
+  (saldo de siempre hasta el fin de ese mes — Patrimonial).
+- **`EstadoUnificado`** es el componente genérico que arma la tabla jerárquica, ordenando por los
+  números reales de Nivel 2/3/4/5 (no alfabético, no hardcodeado).
+- **Signo de PN Origen:** se muestran invertidas (`-1 * acumulado`) porque son cuentas "espejo".
+- **PN Efecto = Activo + Pasivo. PN Causa = PN Origen (invertido) + Resultado Acumulado (invertido).**
+- **"Diagnosticar diferencia"** (visible solo si la ecuación no cierra) corre 4 chequeos
+  automáticos (asientos no balanceados, cuentas puente sin cerrar, cuentas huérfanas) — evita
+  tener que correr SQL a mano cada vez.
 
-- **Una sola fuente de verdad: `asiento_lineas`.** El Balance ya no lee `cashflow`/`operaciones`/`fondos` mezclados — lee un único endpoint, `/balance_unificado?mes=X&anio=Y`, que suma `debe - haber` de `asiento_lineas` (uniendo con `asientos` para descartar los anulados), agrupado por cuenta.
-- Ese endpoint devuelve, por cada cuenta del Plan de Cuentas: `periodo` (movimiento solo de ese mes — lo que importa para Resultados) y `acumulado` (saldo de siempre hasta el fin de ese mes — lo que importa para Patrimonial).
-- **`Balance.js`** es un solo componente genérico (`EstadoUnificado`) que se llama dos veces — una para Resultados (filtro `niv1_desc==="Resultados"`, usa `periodo`), otra para Patrimonial (filtro `niv1_desc==="Patrimonial"`, usa `acumulado`, incluye Activo+Pasivo+PN Origen).
-- **Sin ninguna lista de nombres hardcodeada.** El orden y el agrupamiento salen solos del Plan de Cuentas (ver más abajo, 6 niveles) — agregar una cuenta nueva en Admin aparece sola, en el lugar correcto, sin tocar código.
-- **Signo de PN Origen:** las cuentas de Capital (PN Origen) se muestran invertidas (`-1 * acumulado`) porque son cuentas "espejo" — crecen al revés que Activo/Gasto. Mismo criterio ya aplicado y confirmado.
-- **PN Efecto = Activo + Pasivo. PN Causa = PN Origen (invertido) + Resultado Acumulado (invertido).** Hay una fila de control al final del Balance que muestra la diferencia entre los dos — tiene que dar $0.
-- **El mes de corte (Configuración) hoy NO bloquea nada** — se probó bloquear la carga de saldos iniciales solo en el mes de corte, pero se sacó esa restricción por simplicidad; las celdas de carga de Balance Inicial están siempre disponibles, en cualquier mes. **Pendiente real:** esto es un riesgo — cargar un saldo inicial en el mes equivocado puede romper la ecuación sin aviso.
-- **Expandir/colapsar se guarda en el navegador** (localStorage, clave por pantalla) — si cambiás de pantalla y volvés, queda como lo dejaste.
+## El mecanismo de `asientos` y `asiento_lineas`
+- **`asientos`**: cabecera (id, tipo_origen, descripción, `fecha` real, `anulado`).
+- **`asiento_lineas`**: el detalle real de débito/crédito (`cuenta_patrimonial` texto, `id_cuenta`
+  numérico, `debe`, `haber`) — desde la migración a ID (6-8-2026) cada línea nueva guarda ambos.
+- Anular = `PUT /asientos/{id}/anular`. Revertir todo = `PUT /asientos/{id}/revertir_todo` (ejecuta
+  `reversion_acciones`, ver regla obligatoria en Parte 3).
 
-## Plan de Cuentas — ahora con 6 niveles (cambio grande, hecho hoy)
-- Se agregó **Nivel 6** (`niv6`, `niv6_desc`) — antes el árbol llegaba hasta Nivel 5 y la "cuenta" en sí vivía en el campo `nombre`. Ahora Nivel 6 ES la cuenta puntual.
-- Se agregó la columna **`id_codigo`**: un ID legible, armado concatenando el número de cada nivel (ej. `1.2.1.1.1.11.` = Resultados→Deducciones Variables→Costo de Mercadería→Costo de Alimentos→Costo de Alimentos→Quesos y Fiambres). Se arma solo al cargar una cuenta nueva, nunca a mano.
-- **Los números de cada nivel ya vienen ordenados correctamente** (liquidez para Activo, exigibilidad para Pasivo, etc.) — por eso Balance.js ordena simplemente por el número, sin ninguna lista de excepciones.
-- **Estructura de Nivel 1 nueva:** 1=Resultados, 2=Patrimonial (Activo/Pasivos), **3=Patrimonial (PN Origen, código de Nivel 1 distinto aunque el texto sea el mismo)**, 4=Movimiento. Ojo con esto si se filtra por `niv1` (número) en vez de `niv1_desc` (texto) — usar el texto para agrupar Activo+Pasivo+PN Origen en una sola tabla.
-- **Ventas** ahora se clasifica solo por Turno (Día/Noche) — se sacó el criterio viejo mezclado (Turno + Producto a la vez, que hacía doble conteo).
-- **Personal Operativo** ahora tiene 3 subgrupos propios de Nivel 5: Remuneraciones, Cargas Sociales y Sindicales, Otros Gastos de Personal.
-- **Gastos Administrativos** ahora separa "Abonos Administrativos" (honorarios recurrentes) de "Gastos Varios Administrativos".
-- **"Activos/Pasivos Corrientes vs No Corrientes"** ya es su propio Nivel 3 real en la base — el parche que existía antes en el código de Balance.js para esto se sacó.
-- **Pendiente sin resolver:** hay una cuenta llamada **"Ina"** (Nivel 2, dentro de Resultados) que Emi todavía no explicó qué significa — no tocar ni asumir nada hasta que lo aclare.
-- **Pendiente a decidir:** "IVA Crédito Fiscal" hoy vive del lado de Activo (correcto, contablemente) — pero Emi quiere verla agrupada visualmente junto al cálculo de IVA del lado de Pasivo ("IVA a Pagar"). El diseño actual no permite que una cuenta aparezca en dos lugares — hay que pensar una solución (¿sección aparte "Cálculo de IVA" que cruce ambos lados?) antes de tocar código.
+## Tipos de Comprobante — 3 columnas de configuración (nuevo, 19-8-2026)
+Tabla `tipos_comprobante`, gestionable 100% desde Admin, sin tocar código:
+- **`exige_iva`** (bool): obligación fiscal real de discriminar IVA (Factura/ND/NC A, Tique
+  Factura A). Si está tildado y el IVA queda en $0, la carga se bloquea con aviso.
+- **`es_nota_credito`** (bool): invierte Debe/Haber del asiento entero (baja deuda y gasto).
+- **`admite_negativos`** (bool): permite montos negativos en cualquier campo — el signo decide la
+  dirección (XOR con `es_nota_credito`). Solo el tipo "Ajuste" (id 1001) lo tiene tildado hoy.
+  Cualquier otro tipo con un negativo se bloquea con error claro en el backend
+  (`_crear_comprobante`, `main.py`).
 
-## El mecanismo de `asientos` y `asiento_lineas` — detalle técnico
-- **`asientos`**: cabecera (id, tipo_origen, descripción, `fecha` real de la operación —distinta de cuándo se cargó—, `anulado`).
-- **`asiento_lineas`**: el detalle real de débito/crédito (cuenta_patrimonial, debe, haber) — sin esto, un asiento es solo un recibo vacío. **Todo asiento que afecte el Balance tiene que tener sus líneas, no solo la cabecera.**
-- Anular = `PUT /asientos/{id}/anular` — no borra nada, el Balance ya ignora lo anulado en el cálculo.
-- **Ya conectado, con líneas completas:** Movimiento manual de Tesorería, Transferencia entre fondos, Comprobantes (`operaciones` — Cargar Factura en Cuenta Corriente, con IVA/percepciones separadas correctamente), Saldos Iniciales (con contrapartida automática contra "Saldo Patrimonial de Apertura").
-- **No conectado todavía (sin líneas de asiento):** Registrar Pago, Cheques de Apertura, Vencimientos/confirmar.
+## Cuentas especiales por "código interno" (`_cuenta(cur, codigo)`)
+Mecanismo para resolver cuentas fijas del sistema (Valores Emitidos, IVA Crédito Fiscal,
+Percepciones, Saldo de Apertura, Resultado por Tenencia ME, Tarjetas Pend. Acreditación) por un
+código interno estable (`plan_de_cuentas.codigo_interno`), nunca por nombre de texto ni ID fijo en
+código — así renombrar la cuenta en Admin no rompe nada.
+- **Si el código interno no está sembrado**, la función devuelve un texto placeholder
+  (`[FALTA CONFIGURAR: CODIGO]`) en vez de romper — pero ese texto queda **sin `id_cuenta`
+  asociado**, invisible para Balance, rompiendo la ecuación en silencio hasta que alguien lo nota.
+  **Encontrado hoy (19-8-2026):** `PERCEPCION_IVA` y `PERCEPCION_IIBB` nunca habían sido sembradas
+  — 19 líneas de asiento históricas quedaron con este placeholder. Se crearon 2 cuentas nuevas
+  (`Crédito Fiscal — Percepciones de IVA/IIBB Sufridas`, clasificadas correctamente como **Activo**,
+  no Pasivo como estaban las cuentas de "percepciones bancarias" viejas) con su `codigo_interno`
+  correspondiente, y se corrigieron las 19 líneas rotas por SQL. **Antes de dar por sembrado
+  cualquier código interno nuevo, confirmarlo con SQL** (`SELECT ... WHERE codigo_interno = 'X'`),
+  no asumir.
+
+## Bugs reales encontrados y corregidos hoy (19-8-2026) — para no repetirlos
+
+### 1. `normalizarImporte` (CargaMasiva.js) no manejaba números de miles sin coma decimal
+Un valor como `"968.269"` (novecientos sesenta y ocho mil, sin centavos, sin coma) se interpretaba
+como `968.269` (novecientos sesenta y ocho **coma** dos sesenta y nueve) — mil veces menos. La
+función solo convertía bien cuando había una coma presente. **Arreglada:** ahora también detecta
+el patrón `\d{1,3}(\.\d{3})+` (punto de miles sin coma) y lo trata como tal. Un número real casi
+nunca tiene 3+ dígitos decimales exactos sin coma, así que el patrón es seguro.
+
+### 2. Backend no serializaba tipos de PostgreSQL al guardar `reversion_acciones`
+En `registrar_pago_parcial`, cuando un pago parcial terminaba de cancelar la factura completa, se
+guardaba la fila de `cashflow` (la proyección vieja) directo en `reversion_acciones` para poder
+recrearla si algún día se revierte el pago — pero esa fila viene de la base con tipos Python que
+`json.dumps()` no puede convertir solo (`date`, `Decimal`), rompiendo el guardado con un error real
+de servidor. El frontend, al no chequear `r.ok` antes de leer la respuesta, mostraba "Error de
+conexión" genérico, tapando la causa real. **Arreglado:** se normalizan los valores (`.isoformat()`
+para fechas, `float()` para Decimal) antes de guardarlos.
+
+### 3. Barrida de manejo de errores frontend (37 casos, en Admin.js/Balance.js/CuentaCorriente.js/Titulares.jsx)
+Patrón repetido: leer `r.json()` sin chequear `r.ok` primero, o descartar `data.detail`/`data.error`
+del backend y mostrar un mensaje genérico ("Error al guardar.", "Error de conexión.") que tapaba
+la causa real. Corregido en los 37 casos encontrados — de acá en más, cualquier error real del
+servidor se va a ver en pantalla tal cual, no un mensaje inútil. **Al escribir código nuevo:
+siempre `if (!r.ok) { leer detail } else { leer data }`, nunca asumir que la respuesta es JSON
+válido sin chequear el status primero.**
+
+### 4. Modal atajo de Titulares (CuentaCorriente.js) era una copia reducida e incompleta
+`ModalEditarTitularRapido` (un modal aparte, solo con Plazo e IVA) se abría desde los links
+"Configurar ahora →" en Nueva Factura — pero le faltaban todas las cuentas adicionales (`cod1`-
+`cod10`) y otros campos que sí tiene el modal real. **Arreglado:** se sacó el modal reducido, y
+ahora esos links abren el `ModalTitular` real (importado de `Titulares.jsx`, el mismo que usa la
+pantalla de Titulares) — una sola fuente de verdad para editar un Titular, en cualquier pantalla.
+
+### 5. Fondo default para facturas formales sin respaldo final
+Si un Titular no tenía Fondo propio Y la configuración general (`fondo_default_facturas`) tampoco
+estaba cargada, la factura se creaba pero sin ningún Fondo — bloqueando 19 de 22 facturas en una
+carga masiva real. El camino **informal** ya tenía un tercer nivel de respaldo ("agarrá cualquier
+Efectivo activo"), el camino **formal** no. **Arreglado:** se agregó el mismo respaldo final
+("cualquier Banco activo") al camino formal.
+
+### 6. `sugerirCuentaPatrimonial` (Titulares.jsx) comparaba por nombre de texto
+La sugerencia automática de cuenta patrimonial al elegir la clasificación de un Titular comparaba
+contra nombres de cuenta escritos fijos en el código — si esa cuenta se renombraba, la sugerencia
+quedaba rota en silencio (2 de 7 casos ya estaban rotos). **Arreglado:** ahora resuelve por **ID**
+contra la lista de cuentas vigente — si la cuenta sugerida ya no existe, no sugiere nada roto,
+queda vacío para elegir a mano. Además, se detectó que "Estado - Nacional - Impuestos y Tasas"
+mezclaba IVA y Ganancias bajo una sola sugerencia (ambigua, un impuesto no tiene una sola cuenta
+patrimonial) — se partió en dos clasificaciones separadas ("Estado - Nacional - IVA" / "Estado -
+Nacional - Ganancias"), cada una con su propia cuenta.
+
+## Bug de layout — tabla ancha rompía todo el ancho de la página (19-8-2026)
+Una tabla con muchas columnas (Admin → Plan de Cuentas, filtros por Nivel 1-6) hacía que **toda la
+pantalla** se estirara horizontalmente, en vez de quedar con scroll propio contenido. Causa: el
+contenedor principal de `App.js` (`<div style={{flex:1, ...}}>`, dentro de un flex en columna) no
+tenía `minWidth: 0` — por una regla de CSS poco conocida, un item de flex **no se achica** por
+debajo del tamaño de su contenido aunque tenga `overflow: auto`, salvo que se le ponga
+`minWidth: 0` explícito. **Arreglado en `App.js`** — cualquier tabla ancha futura, en cualquier
+pantalla, ya no puede volver a romper el layout general por este motivo.
+
+## `id_codigo` — chequeo de unicidad
+Se encontró (19-8-2026) que dos cuentas ("IVA Crédito por Gastos Bancarios" e "Iva Debito Fiscal")
+compartían el mismo `id_codigo` — un typo del Nivel 6 numérico al cargar una de las dos.
+Corregido a mano. **No hay validación automática de unicidad todavía** — si se carga una cuenta
+nueva con Nivel 6 repetido dentro del mismo grupo, no hay aviso. Pendiente considerar agregar esa
+validación al backend.
 
 ---
 
 # PARTE 3 — PENDIENTES (lista viva, actualizar seguido)
 
 ## Criterio de diseño: guardado explícito, no automático
-Ningún campo editable debería guardar solo al perder el foco (`onBlur`) — si la persona cambia de ventana (a un Excel, por ejemplo) a mitad de tipear un número largo, se guarda la mitad sin darse cuenta. Regla: **solo Enter guarda**; perder el foco sin Enter **cancela** (no guarda nada). Esto ya se aplicó a la celda de carga de Saldos Iniciales en Balance — aplicar el mismo criterio a cualquier campo editable nuevo que se construya de acá en más.
+Ningún campo editable debería guardar solo al perder el foco (`onBlur`) — regla: **solo Enter
+guarda**; perder el foco sin Enter **cancela** (no guarda nada).
 
 ## MAPA — Registros patrimoniales vs no patrimoniales (base para saber qué necesita asiento)
-**Principio:** un asiento se registra cuando cambia un Activo o un Pasivo — no hace falta que se mueva plata (una factura recién cargada ya genera deuda y gasto, sin haber pagado nada todavía). Si cambia un Resultado, por partida doble siempre cambió también un Activo o un Pasivo — por eso alcanza con decir "Activo o Pasivo", no hace falta agregar "o Resultado" aparte.
+**Principio:** un asiento se registra cuando cambia un Activo o un Pasivo.
 
-**No patrimoniales (altas de configuración/maestros — nunca generan asiento):**
-Titulares (alta de Proveedor/Cliente), Plan de Cuentas (alta de una cuenta), Fondos (el alta en sí, no su saldo inicial), Configuración, Empleados (el alta en RRHH), catálogos (Puestos, Conceptos de Liquidación).
+**No patrimoniales (nunca generan asiento):** Titulares, Plan de Cuentas (alta), Fondos (alta),
+Configuración, Empleados (alta), catálogos.
 
-**Patrimoniales (tienen que generar asiento) — estado real, revisado de punta a punta el 18-7-2026:**
-
-| Pantalla de origen | Registro / Acción | ¿Genera asiento hoy? | ¿Eliminar el registro revierte el asiento? |
+**Patrimoniales (tienen que generar asiento):**
+| Pantalla de origen | Registro / Acción | ¿Genera asiento hoy? | ¿Eliminar revierte? |
 |---|---|---|---|
-| Balance | Saldo Inicial | ✅ | ✅ Sí |
-| Balance | Cheque de Apertura — crear | ✅ | ✅ Sí |
-| Cuenta Corriente | Carga de factura de compra (devengamiento) | ✅ | ✅ Sí |
-| Cuenta Corriente | Registrar Pago | ✅ | ✅ Sí |
-| Cuenta Corriente | Registrar Pago con ECheq — emitir | ✅ | ✅ Sí |
-| Tesorería | Movimiento Manual (incluye el atajo "Acreditación de Tarjetas", mismo mecanismo — no es un tipo aparte) | ✅ | ✅ Sí |
-| Tesorería | Transferencia entre Fondos | ✅ | ✅ Sí |
-| Tesorería | Cheque de Apertura — confirmar débito | ✅ | ✅ Sí |
-| Tesorería | Registrar Pago con ECheq — confirmar débito | ✅ | ✅ Sí |
-| Tesorería | Anular ECheq | ✅ | ✅ Sí |
-| Tesorería | Postergar/Reprogramar una fecha | No genera asiento | No aplica |
+| Balance | Saldo Inicial | ✅ | ✅ |
+| Balance | Cheque de Apertura — crear | ✅ | ✅ |
+| Cuenta Corriente | Carga de factura (Factura/NC/Ajuste) | ✅ | ✅ |
+| Cuenta Corriente | Registrar Pago (TD/ECheq/Parcial) | ✅ | ✅ |
+| Tesorería | Movimiento Manual / Transferencia | ✅ | ✅ |
+| Tesorería | Confirmar débito (Cheque Apertura / ECheq) | ✅ | ✅ |
+| Tesorería | Anular ECheq | ✅ | ✅ |
 | R.R.H.H. | Liquidar sueldos | ❌ No conectado | — |
 | R.R.H.H. | Pagar a un empleado | ❌ Ni existe | — |
-| Circuito F (archivo de Tomy) | Facturación automática | ⚠️ Sin revisar | ⚠️ Sin revisar |
+| Circuito F (de Tomy) | Facturación automática | ⚠️ Sin revisar | ⚠️ Sin revisar |
 
-
-## REGLA OBLIGATORIA — Nunca identificar una línea de asiento por nombre de cuenta, siempre por id_asiento
-Encontrado el 19-7-2026: `actualizar_cheque_apertura` identificaba qué línea actualizar con `WHERE cuenta_patrimonial = 'Saldo Patrimonial de Apertura'` (por nombre) en vez de por el id del asiento. Después de muchas horas de pruebas (confirmar/desconfirmar/editar el mismo cheque repetidas veces), un asiento terminó con la fecha y las líneas de otro — probablemente un `UPDATE ... WHERE cuenta_patrimonial = X` pisó la fila equivocada en algún momento, sin que el sistema tuviera forma de darse cuenta del error. **Arreglado:** ahora, para actualizar las líneas de un asiento que ya existe, siempre se borran todas sus líneas (`DELETE FROM asiento_lineas WHERE id_asiento = %s`, usando el id conocido y sin ambigüedad) y se reconstruyen de cero — nunca "buscar y actualizar por nombre de cuenta". Aplicar este mismo criterio a cualquier función nueva que edite un asiento existente.
+## REGLA OBLIGATORIA — Nunca identificar una línea de asiento por nombre de cuenta
+Siempre por `id_asiento` conocido, nunca `WHERE cuenta_patrimonial = X`. Reconfirmado hoy — el
+mismo tipo de error (usar `WHERE id_asiento = X` sin filtrar además por línea puntual) rompió por
+un momento el asiento 1671 al corregirlo — se arregló, pero sirve de recordatorio: **al corregir
+una sola línea de un asiento con 2+ líneas, filtrar también por algo que identifique esa línea
+específica (su propio `id`), no solo por `id_asiento`.**
 
 ## REGLA OBLIGATORIA — Todo asiento nuevo tiene que declarar cómo se revierte
-El mecanismo de "Revertir todo" (Libro Diario) es genérico: `revertir_todo_asiento` no tiene ningún caso hardcodeado por tipo, solo ejecuta lo que el asiento ya trae anotado en la columna `asientos.reversion_acciones` (ver helper `_set_reversion` en `main.py`). Esto significa que **cualquier función nueva que cree un asiento (Registrar Pago, Liquidaciones, lo que sea) tiene la obligación de llamar a `_set_reversion(cur, id_asiento, [...])` antes de terminar** — indicando qué fila(s) borrar o qué campos actualizar si ese asiento se revierte algún día. Si no se llama, "Revertir todo" cae en una red de seguridad genérica (borra lo que encuentre directo en `operaciones`/`cashflow`/`saldos_iniciales` por `id_asiento`) que puede no alcanzar para algo con doble efecto (ej. cancelar una deuda Y bajar el Fondo a la vez). **No es automático — hay que acordarse de declararlo cada vez.**
-
-## PRINCIPIO CENTRAL — Reconciliación obligatoria (Emi, altísima prioridad)
-**Balance es simplemente el resultado de Libro Diario (que hoy funciona también como Mayor).** Lo que diga Libro Diario es lo que dice Balance — no hay una fuente de verdad paralela.
-
-De acá se desprende una regla que el sistema **tiene que verificar siempre, en todo momento**: el saldo de cada registro individual tiene que coincidir con lo que dice el Libro Diario/Mayor para esa misma cuenta. Por ejemplo:
-- El saldo de cada Fondo en Tesorería = lo que el Libro Diario acumula para esa cuenta de Fondo.
-- El total adeudado en Cuenta Corriente (por Titular, y en general) = lo que el Libro Diario acumula para "Proveedores a Pagar" (o la cuenta que corresponda).
-- Cualquier otro total mostrado en cualquier pantalla, que derive de una cuenta patrimonial, tiene que coincidir con el Libro Diario para esa cuenta.
-
-**Nunca puede pasar que una pantalla diga "se debe" y el Balance diga "no se debe" (o viceversa)** — es exactamente el problema que se detectó hoy con "Anular" en Libro Diario (anulaba el asiento pero la factura seguía viva en Cuenta Corriente). Por eso se sacó ese botón — ver más abajo.
-
-**Pendiente de construir:** algún mecanismo de control/auditoría que chequee esto automáticamente (ej. un botón o proceso que compare saldo por saldo entre cada pantalla y lo que dice Libro Diario, y avise si hay una diferencia) — todavía no existe, pero es la garantía de fondo de que todo el sistema es confiable. Diseñar con calma cuando se retome.
-
-## Decisión de hoy: sacar "Anular" de Libro Diario, dejar solo "Revertir todo"
-Se discutió si mantener los dos botones (Anular = solo marca el asiento; Revertir todo = anula y borra la fila real que lo generó). Se concluyó que **"Revertir todo" siempre hace al menos lo mismo que "Anular", y nunca deja el problema de "asiento anulado pero el registro original sigue vivo en su pantalla"** (que rompe justamente el principio de reconciliación de arriba). Por eso se sacó "Anular" — Libro Diario ahora solo tiene "Revertir todo". El "Eliminar" propio de cada pantalla (Cuenta Corriente, Tesorería) sigue funcionando igual, con sus propias reglas de negocio, y ya anula el asiento correctamente al usarse.
+Cualquier función que cree un asiento tiene que llamar a `_set_reversion(cur, id_asiento, [...])`
+antes de terminar. **Si esas acciones incluyen guardar una fila completa de la base (para poder
+recrearla), hay que normalizar sus tipos (fechas, Decimal) antes de guardarlas** — ver bug #2 de
+hoy en Parte 2.
 
 ## Prioridad 1 — Terminar de conectar `asientos`/`asiento_lineas`
-- [ ] **Bug encontrado hoy: `eliminar_operacion` no anula el asiento vinculado.** Borra la fila de `operaciones` y la proyección de `cashflow`, pero el asiento (y sus líneas de débito/crédito) queda activo — Balance sigue contando algo que ya no existe en ningún otro lado. Hay que revisar TODOS los endpoints de eliminar (no solo este) para el mismo agujero.
-- [ ] **Diseño de eliminación bidireccional, ya acordado con Emi:**
-  - Desde cada pantalla (Cuenta Corriente, Tesorería, etc.): "Eliminar" sigue respetando las reglas propias de esa pantalla (ej. no se puede borrar una factura ya pagada) — pero además de lo que ya hace, tiene que anular el asiento vinculado.
-  - Desde Libro Diario: agregar un botón nuevo, aparte del "Anular" simple que ya existe — **"Revertir todo"**. Anula el asiento Y borra de verdad cualquier fila en `operaciones`/`cashflow`/`saldos_iniciales` que tenga ese mismo `id_asiento`, sin importar las reglas de la pantalla de origen. Pensado para uso restringido (Emi/Tomy), no para el flujo normal.
-- [ ] **Registrar Pago** — el más delicado: mueve Caja/Banco Y cancela deuda a la vez. Diseñar con calma: ¿un asiento para las dos partes, o dos asientos relacionados?
-- [ ] **Cheques de Apertura**.
-- [ ] **Vencimientos/confirmar** en Tesorería.
+- [ ] Revisar TODOS los endpoints de eliminar por el mismo agujero que tenía `eliminar_operacion`
+  (no anulaba el asiento vinculado — ya arreglado ahí, confirmar en el resto).
+- [ ] Cheques de Apertura / Vencimientos-confirmar — revisar si falta algo.
 
-## Prioridad 2 — Liquidaciones ↔ Balance (nunca se construyó, pero ya está diseñado — construir así)
-Decisión ya conversada y cerrada (no volver a discutir el diseño, solo construirlo):
-- Al apretar **"Liquidar"**: devenga el gasto de sueldos en el Cuadro de Resultados, y genera **una sola línea** de "Sueldos a Pagar" en el Pasivo — el total de todos los empleados de ese mes, no una línea por persona.
-- **Cada empleado necesita su propio saldo pendiente** (liquidado vs. pagado), con arrastre mes a mes si se le paga de menos — mismo mecanismo que ya existe para Titulares (IMPAGO/PARCIAL/PAGO), aplicado a cada empleado en vez de a cada proveedor. Este detalle vive en Liquidaciones (o una pantalla tipo "Cuenta Corriente de Empleados"), **no** en el Balance — el Balance solo ve el total.
-- El pago (botón "Pagar" en Liquidaciones, a construir) cancela el saldo pendiente del empleado y baja Caja/Banco — mismo patrón que "Registrar Pago" ya usa para facturas de Titulares, no un mecanismo nuevo.
-- Falta definir el **asiento** que corresponde a cada paso (Liquidar y Pagar) — usar el mismo mecanismo de `asientos` ya construido.
+## Prioridad 2 — Liquidaciones ↔ Balance (diseño ya cerrado, falta construir)
+Sin cambios respecto a lo ya documentado — "Liquidar" tiene que devengar el gasto y generar
+"Sueldos a Pagar", con saldo pendiente por empleado (mismo mecanismo que Titulares).
 
-## Pendiente de diseño — Subdiario de Ventas y Tarjetas Pendientes de Acreditación
-**Problema real:** ventas hechas antes del corte (31-5) con tarjeta se acreditan días/semanas después (a veces ya en Junio). Hoy no hay forma de identificar, transacción por transacción, cuáles acreditaciones de Junio corresponden a ventas de Mayo (antes del corte) vs. ventas propias de Junio — porque el subdiario de Ventas (el anexo detallado, con otras personas cargando operaciones) todavía no existe.
+## Pendiente de diseño — IVA a Pagar / Ganancias a Pagar no se calculan solas (nuevo, 19-8-2026)
+Se crearon las cuentas "IVA a Pagar" (id 230) y "Ganancias a Pagar" (id 232) como **contenedores
+vacíos** — el sistema **no calcula sola** la suma neta (Débito Fiscal − Crédito Fiscal −
+Retenciones − Percepciones, y su equivalente para Ganancias) ni la vuelca ahí automáticamente al
+cargar comprobantes. Falta diseñar un **asiento de cierre periódico** (mensual, al momento de
+liquidar el impuesto) que compense las cuentas de crédito/débito existentes y mueva el neto real a
+estas dos cuentas nuevas. Hasta que ese asiento exista, van a quedar siempre en $0.
 
-**Decisión provisoria tomada (Emi + Claude, de acuerdo):** hasta que se diseñe el subdiario de Ventas, **se considera que toda acreditación de tarjeta a partir del 1-6 corresponde a ventas anteriores al corte (31-5)**. Esto permite cargar un saldo inicial en "Tarjetas Pend. Acreditación" (Activo) en el Balance Inicial, con un asiento simple cuando se cobra: Banco (Debe) / Tarjetas Pend. Acreditación (Haber) — sin tocar la cuenta Ventas.
+## Pendiente — Titulares con CUIT duplicado, sin CUIT real cargado (nuevo, 19-8-2026)
+Se les borró el CUIT (para no bloquear futuras cargas) a 8 Titulares que compartían CUIT con
+nombres distintos: Chirico / Nivel 7 Design / SBG SA, y MACARONS S.R.L. / EL HERALDO / Librum /
+TURBOBLENDE / Macarons SRL. **Pendiente:** cargar el CUIT real de cada uno — hoy quedaron sin CUIT
+(ninguno tiene uso todavía, así que no hay urgencia ni riesgo).
 
-**Por qué se descartó la otra opción** (tratar esas acreditaciones de Junio como venta propia de Junio: Banco Debe / Ventas Haber, sin saldo inicial en Activo): esa alternativa subestima el Activo en el corte (esa plata ya se había ganado antes del 31-5) e infla artificialmente las ventas de Junio con el cobro de una venta vieja — un error más difícil de destrabar después, y que además exige construir el asiento complejo de Ventas antes de tener el subdiario listo.
+## Pendiente — Rubro "IVA a Pagar" en Nivel 5, revisar si necesita ajustes
+Se confirmó que "IVA a Pagar" ya existe como agrupador de Nivel 5, con 4 cuentas puntuales
+adentro (IVA Crédito Fiscal, Crédito por Gastos Bancarios, Débito Fiscal, Percepciones Bancarias
+RG 2408) — el sistema de 5 niveles ya resuelve esta agrupación sin necesitar Nivel 6. No confundir
+esta agrupación de Nivel 5 con las cuentas nuevas "IVA a Pagar"/"Ganancias a Pagar" (Nivel 6,
+contenedores del neto — ver punto de arriba).
 
-**Pendiente real, para cuando se construya el subdiario de Ventas:** revertir esta carga provisoria del saldo inicial de "Tarjetas Pend. Acreditación", y reemplazarla por el dato real, transacción por transacción, una vez que el anexo de Ventas permita distinguir qué acreditación corresponde a qué venta y de qué fecha.
-
-## Prioridad 3 — Nuevo, de la sesión de hoy
-- [ ] **Definir qué es la cuenta "Ina"** (Resultados, Nivel 2) — preguntarle a Emi antes de tocarla.
-- [ ] **Decidir cómo mostrar "IVA Crédito Fiscal"** — vive en Activo, pero Emi la quiere ver junto al cálculo de IVA en Pasivo. Pensar diseño antes de escribir código.
-- [ ] **Reconsiderar si el mes de corte debería bloquear la carga de Saldos Iniciales** en cualquier otro mes — se sacó esa protección hoy por simplicidad, queda como riesgo abierto.
-- [ ] Revisar bien el signo de **Ventas** cuando se cargue la primera venta real (todavía no se probó empíricamente si el signo sale como se espera — solo se probó con Gastos).
-
-## ✅ RESUELTO (6-8-2026) — Migración a ID completa
-**Se hizo, el mismo día, apenas se detectó.** `asiento_lineas`, `cashflow`, y `titulares.cod1-cod10` ahora tienen columna `id_cuenta`/`cod{N}_id`, poblada automáticamente por trigger en cada guardado (nunca depende de que el código Python se acuerde). Balance y `desglose_por_titular` ya leen por ID, no por texto — renombrar una cuenta ya no rompe nada en silencio. El filtro de cuentas en Tesorería también migrado a ID. Único resto: 13 Titulares viejos sin uso real (`$0` movimientos) que no llegaron a emparejar `cod1_id` — no vale la pena arreglarlos, no afectan nada.
-
-**Además:** se agregó un botón "Diagnosticar diferencia" en Balance (visible solo cuando la ecuación no cierra) — corre los mismos 4 chequeos que se venían haciendo a mano por SQL, directo desde la pantalla.
-
-### Contexto original (por qué se hizo)
-**Renombrar una cuenta del Plan de Cuentas puede romper silenciosamente años de historial, sin ningún aviso en pantalla.** Encontrado el 6-8-2026, con "Gatos Generales de Obra" → "Gastos Generales de Obra" (typo a corregir), y ya nos había pasado antes en la misma sesión con "Honorarios Jurídicos".
-
-**Causa raíz:** el nombre de cada cuenta se guarda como **texto plano copiado** en cada asiento (`asiento_lineas.cuenta_patrimonial`) y en cada movimiento (`cashflow.cod_cuenta`) — no como una referencia a un ID estable que se actualice sola. Si renombrás una cuenta desde Admin → Plan de Cuentas → Editar, **todo el historial que ya usaba el nombre viejo queda huérfano** — invisible para Balance, sin ningún error visible en la pantalla de edición, rompiendo la ecuación (PN Efecto ≠ PN Origen) recién cuando alguien lo nota después, potencialmente mucho tiempo después.
-
-**Por qué es grave:** no hay ningún cartel de advertencia hoy. Cualquiera (Emi, Tomy, un futuro usuario) puede renombrar una cuenta para corregir un typo — algo que parece 100% inofensivo — y sin saberlo, desconectar años de asientos ya cargados, sin enterarse hasta que el Balance deje de cuadrar.
-
-**Lo que se hizo hoy, como parche manual (no como solución):** después de cada rename, correr un SQL a mano que actualiza `asiento_lineas` y `cashflow` con el nombre nuevo. Esto **depende de que alguien se acuerde de hacerlo** — no es sostenible como único mecanismo.
-
-**Ideas para la solución de fondo (a definir, ninguna implementada todavía):**
-1. **Advertencia obligatoria en el modal de Editar cuenta:** antes de guardar un cambio de nombre, el backend cuenta cuántas filas de `asiento_lineas`/`cashflow` usan el nombre viejo, y si hay alguna, el frontend muestra un cartel fuerte ("Esta cuenta tiene X movimientos históricos — ¿migrarlos también al nombre nuevo?") con confirmación explícita.
-2. **Automatizar la migración:** que el propio `PUT /plan_cuentas/{id}` (el endpoint de editar cuenta), al detectar un cambio de `nombre`, actualice él mismo `asiento_lineas` y `cashflow` en la misma transacción — sin depender de que alguien corra SQL a mano después.
-3. **Cambio estructural más de fondo (más trabajo, más sólido):** que `asiento_lineas` y `cashflow` referencien las cuentas por **ID** en vez de por nombre de texto, y el nombre se resuelva siempre al mostrar, nunca se guarde copiado. Esto eliminaría el problema de raíz, pero es una migración de datos grande (tocaría years de historial ya cargado) — no para hacer sin pensarlo con cuidado.
-
-**Decisión tomada (6-8-2026):** Emi confirmó que la Opción 3 es la correcta — el error de fondo es depender del **texto** en vez del **ID** (su sistema viejo en Excel/VBA ya lo resolvía bien). Migrar `asiento_lineas` y `cashflow` a referenciar cuentas por ID, resolviendo el nombre solo al mostrar, nunca guardándolo copiado. Es una migración de datos grande (toca años de historial ya cargado), así que se planifica con cuidado, **no se implementa apurado** — retomar con la cabeza fresca. Hasta que esto esté migrado, seguir usando el parche manual (SQL a mano después de cada rename) como mitigación temporal.
-
-## Otros pendientes conocidos
-- [ ] **`cod1`-`cod10` sirven para dos cosas distintas, sin conflicto hoy — pero podría haberlo.** Se usan tanto para filtrar la cuenta contable en Tesorería (Movimiento Manual) como para las cuentas de gasto alternativas en Facturas. Hoy no choca porque el único Titular que usa muchas cuentas variadas en Tesorería es "Egresos Genéricos", que nunca genera Cuenta Corriente ni Facturas. **Revisar el día que aparezca un Titular que necesite las dos cosas a la vez** (Emi mencionó "Empleados" como candidato futuro) — ahí probablemente haga falta separar en dos campos distintos, uno por función.
-- [ ] **N° Comprobante — separar Punto de Venta y Número.** Hoy es un solo campo de texto libre ("0001-00000123"), sin formato ni cantidad de dígitos fija. Emi pidió separarlo en 2 campos (Punto de Venta / Número), con formato automático tipo teléfono, para no tener que tipear ceros a mano — aplica al modal individual "Nueva Factura" y a la Carga Masiva de Facturas. Pendiente de diseñar (cuántos dígitos fijos para cada uno, si varía según tipo de comprobante).
-- [ ] **Validación de rubro entre cuenta de gasto y cuenta patrimonial.** Hoy, al elegir una cuenta de gasto alternativa para una factura (Nivel 4 o `cod1`-`cod10` del Titular), el sistema confía en que esas cuentas ya estén bien cargadas en Titulares — no valida que el "rubro" de la cuenta de gasto sea coherente con el rubro de la `cuenta_patrimonial` del Titular (ej. que un Proveedor no termine con una cuenta de gasto de "Sueldos"). Emi lo señaló como una debilidad real. Por ahora la responsabilidad de la coherencia queda en cómo se carga cada Titular a mano; una versión más sólida necesitaría modelar "rubros" y validar que ambas cuentas pertenezcan al mismo, lo cual no está diseñado todavía.
-- [ ] **Faltan herramientas sólidas para rastrear diferencias/duplicados.** Encontrado el 3-8-2026, al investigar una diferencia de $54.828 en una carga masiva de "Gastos Generales de Obra" — no hubo forma de rastrearla desde la interfaz, hubo que ir directo a SQL. Dos gaps concretos que Emi señaló: (1) el filtro por Importe en Tesorería es pobre (no deja buscar/ordenar bien para encontrar un monto puntual entre miles de filas); (2) Libro Diario no tiene ningún orden claro (no se puede ordenar por cuenta, ni por monto) para poder comparar una cuenta contra una fuente externa (ej. un archivo de Excel) línea por línea. Pendiente: pensar una pantalla o modo de "conciliación" — comparar un archivo externo contra lo cargado, mostrando qué coincide y qué no, para no depender de SQL manual cada vez que haya una diferencia como esta.
-- [ ] **La grilla de Fondos de arriba de Tesorería (por Fondo individual) etiqueta mal los valores en USD.** Encontrado el 19-7-2026, sin arreglar todavía. `saldoActual(f)` / `saldoProyect(f)` (usadas en la grilla de arriba, por Fondo — `fondosCorrientesOrdenados.map`, `fondosNoCorrientes.map`, etc.) devuelven un valor que ya está en **pesos** (viene de `f.saldo_inicial + f.movimientos`, que suman `cashflow.importe`, siempre en pesos por diseño) — pero se le pone el prefijo **"U$S"** (función `fmtU`) sin ninguna conversión real, como si ese número ya fuera la cantidad de dólares. No es la misma doble-conversión que se arregló hoy en los totales EFVO/CUENTAS/RESERVA (esa sí se corrigió) — es un problema aparte, en la celda por Fondo individual de la grilla superior. Para arreglarlo bien: esa celda debería mostrar la **cantidad real de USD** de ese Fondo puntual (ya disponible vía `/fondos_usd_saldos`, que ya se usa hoy para la franja nueva de "Cantidad de USD en Tesorería"), no `saldoActual(f)` convertido a texto. Tocar con cuidado — `saldoActual`/`saldoProyect` se usan en varios lugares del archivo, revisar todos antes de cambiar su forma.
-- [ ] **Filtros de Tesorería — pasar de "elección única" a "elección/descarte" (estilo Excel moderno).** Hoy `FiltroDropdown` (en `Tesoreria.js`) deja elegir un solo valor por vez (o "Todos") en cada columna con filtro (Mes, Fecha, Estado, Titular, Detalle, Pago, Débito, Fondo, Importe — 9 columnas en total). Cambiarlo a lista con checkbox, todos tildados por default, destildando los que no se quieren ver — el mismo cambio que hizo Excel hace años (raro al principio, terminó siendo indispensable). Toca el componente `FiltroDropdown` y la lógica de filtrado de filas — evaluar si conviene hacerlo de una sola vez en las 9 columnas o empezar por una sola (ej. Fondo) para probar el criterio antes de aplicarlo a todas.
-- [x] ~~Crear un Fondo nuevo (Admin) no conecta solo con Balance~~ — **Resuelto (18-7-2026):** el modal "+ Nuevo Fondo" en Admin ahora crea la cuenta contable en Plan de Cuentas y la conecta al Fondo en un solo paso.
-- [ ] **Rehacer el anexo "Movimientos Agrupados" (Egresos e Ingresos, cuentas agrupadas, mensual).** Existió en una sesión anterior, se perdió en algún momento. Sirve para dos cosas: (1) ver de un vistazo los movimientos de Banco agrupados por cuenta contable (a diferencia de "Valores Emitidos", que es una sola línea fácil de verificar, el saldo de Banco es el resultado de muchas operaciones mezcladas — este anexo las separa por cuenta); (2) es la base para el **control de ecuación mediante cálculo independiente** que Emi pidió (Prioridad 3 de la sesión anterior) — un control que no dependa de los mismos datos que arma Balance, para que sea una verificación real.
-- [ ] **Carga masiva por Excel (para arrancar un cliente nuevo, uso excepcional de Emi, no para usuarios finales):** una planilla por tipo de registro (Comprobantes/Facturas, Movimientos de Tesorería, etc.), con las columnas calcadas de los campos que ya pide cada modal de carga. Sirve para poblar rápido el historial de una empresa que arranca con el sistema, en vez de cargar factura por factura a mano. Falta definir: un endpoint tipo `/importar_comprobantes` (o similar por tipo de registro) que reciba una lista y cree cada uno con su asiento correspondiente, igual que si se hubiera cargado desde el modal uno por uno.
-- [ ] Referencias de "hoy" vs "mes que se está liquidando" en algunos avisos de mínimo de Liquidaciones.
+## Otros pendientes conocidos (heredados, sin cambios)
+- [ ] `cod1`-`cod10` sirven para dos cosas distintas (Tesorería + Facturas) — revisar el día que
+  aparezca un Titular que necesite las dos a la vez.
+- [ ] N° Comprobante — separar Punto de Venta y Número en 2 campos con formato automático.
+- [ ] Validación de rubro entre cuenta de gasto y cuenta patrimonial — no está modelado.
+- [ ] Filtros de Tesorería — pasar a estilo checkbox (elegir/descartar), no solo "un valor por vez".
+- [ ] Rehacer el anexo "Movimientos Agrupados" (Egresos/Ingresos por cuenta) — perdido en una
+  sesión anterior.
+- [ ] Carga masiva por Excel para arrancar un cliente nuevo — pendiente de diseño.
 - [ ] Corrección de un mes ya liquidado (`es_borrador = false`) — sin diseñar.
-- [ ] Impresión de recibos de sueldo (placeholder sin funcionalidad).
 - [ ] AFIP/ARCA — sin definir método.
-- [ ] **Autenticación / multi-tenant — no implementado.** Hoy Admin (y también el botón "Vaciar todo el sistema" de Libro Diario) se protegen con una clave simple hardcodeada del lado del frontend ("1978") — no es seguridad real, cualquiera que mire el código fuente la ve. Emi decidió posponer una protección seria (login de verdad, validado en el backend) para más adelante.
-- [ ] **Pago parcial con cheque (voluntario o por error de emisión) — sin resolver.** Si el importe de un cheque termina sin coincidir con el importe de la factura que canceló, no hay tratamiento para eso en Cuenta Corriente ni en el vínculo factura↔pago.
-- [ ] **Riesgo de doble carga si se aprieta Enter dos veces muy rápido** (antes de que la pantalla reaccione al primer envío) — mencionado, no arreglado. Solución simple cuando se retome: ignorar el segundo Enter mientras el primero todavía está guardando.
-- [ ] **Circuito F (facturación automática, archivo de Tomy) — sin revisar si genera `operaciones`/asientos correctamente.** No tocar sin preguntarle a Tomy antes.
-- [ ] **Liquidar sueldos / Pagar a un empleado (R.R.H.H.) — sin conectar a asientos.** Ver tabla completa de "Registros patrimoniales" más arriba en este manual.
-
-### Criterio de sesión larga (18-7-2026) — Editar vs. Revertir, todavía en discusión, sin construir nada aún
-Después de mapear los flujos de Cheques de Apertura y Registrar Pago, surgió una discusión de fondo sobre qué debería poder **editarse directamente** en una pantalla vs. qué solo puede corregirse **revirtiendo el asiento** (Libro Diario). Quedó así, pendiente de aplicar:
-
-- **Cheques (Banco/Billetera) ya Confirmados:** nunca se editan. Solo Reprogramar (si no están confirmados) o Confirmar. Un error se corrige revirtiendo — **pendiente de construir un botón "Deshacer este pago"** en Cuenta Corriente o Tesorería (lenguaje liviano, sin mencionar "asiento"), que por dentro llame al mismo mecanismo de `revertir_todo_asiento` — **solo disponible si el cheque NO está confirmado todavía** (si ya entró al banco de verdad, no hay reversión posible desde el usuario, ahí es historia bancaria).
-- **Todo lo demás (Movimiento Manual, Transferencia, Pago directo en Efectivo o Banco):** el campo `confirmado` en estos casos NO es un hecho externo verificado (a diferencia de un cheque) — es solo "ya pasó la fecha". Por eso, **el criterio acordado es: editable libremente** (fecha, importe, detalle), sin distinción de si está "confirmado" o no. Al editar, el mecanismo correcto es el mismo que ya se usa en Saldo Inicial y Cheque de Apertura: **reemplazar las líneas del asiento existente, no crear ni borrar nada** — Balance se actualiza solo, porque lee siempre en vivo de `asiento_lineas`.
-- **Metodología acordada para ir aplicando esto:** de mayor a menor. Por ahora, el único camino real para corregir cualquier cosa sigue siendo Libro Diario → Revertir Todo (tratando a un "usuario 2" imaginario como si tuviera ese mismo acceso). Se va mapeando pantalla por pantalla qué ediciones/reversiones tienen sentido habilitar ahí mismo (como ya se hizo con Cheques de Apertura). Recién al final, cuando los atajos necesarios ya estén construidos, se le saca a ese "usuario 2" el acceso directo a Libro Diario — quedando restringido a Admin en producción real.
-- **Pendiente inmediato para retomar:** revisar `CuentaCorriente.js` (Emi lo va a pasar) bajo este mismo criterio — todavía no se aplicó nada de esto en código, solo quedó acordado en la charla.
+- [ ] Autenticación / multi-tenant — no implementado (Admin sigue con clave simple hardcodeada).
+- [ ] Pago parcial con cheque cuyo importe no coincide con la factura — sin tratamiento.
+- [ ] Riesgo de doble carga si se aprieta Enter dos veces muy rápido.
+- [ ] Circuito F (de Tomy) — sin revisar si genera asientos correctamente.
+- [ ] Confirmar con Tomy el detalle de `CircuitoF.js`/`CargaAutomatica.js` antes de tocarlos.
+- [ ] Reconsiderar si el mes de corte debería bloquear la carga de Saldos Iniciales en otro mes.
+- [ ] Definir qué es la cuenta "Ina" (Resultados, Nivel 2) — preguntarle a Emi antes de tocarla.
+- [ ] Decidir cómo mostrar "IVA Crédito Fiscal" (vive en Activo, se quiere ver junto a Pasivo).
 
 ## Visión a futuro (no tocar todavía, solo para tener en mente)
-- Hoy Balance, Admin y Libro Diario los usan únicamente Emi y Claude (y a veces Tomy) — no hay usuarios externos todavía, así que no hace falta resolver permisos/organización de menú con urgencia.
-- **Idea para más adelante:** la información ya procesada en Balance podría alimentar páginas estáticas tipo "informes" para terceros (socios, un usuario autorizado, etc.) — una vista de solo lectura, más simple, separada de las pantallas de carga/edición que usa Emi. No diseñar esto todavía, solo tenerlo presente para cuando se hable de organización de accesos y menús.
+- Hoy Balance, Admin y Libro Diario los usan únicamente Emi y Claude (y a veces Tomy) — no hay
+  usuarios externos todavía.
+- Idea para más adelante: alimentar informes de solo lectura para terceros a partir de Balance.
+- Dashboard es el primer paso hacia algo más visual — pensar qué gráficos siguen (Cuenta
+  Corriente por Titular, Fondos en el tiempo, comparativo mes a mes) antes de sumar de más.
 
 ## Preguntas abiertas
 - [ ] Confirmar con Tomy el detalle de `CircuitoF.js` y `CargaAutomatica.js` antes de que Claude los toque alguna vez.
+- [ ] ¿La pantalla "Fondos" (con Slots fijos "1EFVO$", "2EFVO$", etc.) debería dejar de depender de
+  una lista de 10 slots hardcodeados y mostrar cualquier Fondo activo? Hoy, un Fondo con una
+  abreviatura (`abrev`) que no coincide exacto con esos 10 valores queda invisible en esa pantalla,
+  aunque exista bien en la base — pasó hoy con 4 Fondos de prueba (ya eliminados). Evaluar si vale
+  la pena rediseñar esa pantalla o si el sistema de slots fijos es intencional y hay que
+  documentarlo mejor para no crear Fondos con abreviaturas raras.
