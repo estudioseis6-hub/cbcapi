@@ -1303,6 +1303,7 @@ class PagoIn(BaseModel):
     detalle: str
     ids_operaciones: list[int]
     medio_pago: str = "TD"
+    forzar_no_efectivo: bool = False
 
 @app.post("/registrar_pago")
 def registrar_pago(p: PagoIn):
@@ -1310,11 +1311,18 @@ def registrar_pago(p: PagoIn):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
-            if cur.fetchone():
+            hay_informal = cur.fetchone()
+            if hay_informal:
                 cur.execute("SELECT tipo FROM fondos WHERE id = %s", (p.id_fondo,))
                 fondo_row = cur.fetchone()
-                if fondo_row and fondo_row["tipo"] != "Efectivo":
+                if fondo_row and fondo_row["tipo"] != "Efectivo" and not p.forzar_no_efectivo:
                     return {"ok": False, "error_fondo_informal": True}
+            # Excepción consciente (nunca por default) — la operación SIGUE siendo informal en la
+            # base (no se falsea el dato), solo queda una constancia explícita en el detalle del
+            # pago de que fue una excepción a la regla de "informal = solo efectivo".
+            detalle_pago = p.detalle
+            if hay_informal and p.forzar_no_efectivo:
+                detalle_pago = f"[EXCEPCIÓN — pago no efectivo de operación informal] {p.detalle}"
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha = date.fromisoformat(p.fecha)
@@ -1328,16 +1336,16 @@ def registrar_pago(p: PagoIn):
             fila_fondo = cur.fetchone()
             cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{p.id_fondo}")
             monto = abs(total)
-            id_asiento = _crear_asiento(cur, "PAGO", p.detalle or f"Pago a Titular #{p.id_titular}", fecha)
+            id_asiento = _crear_asiento(cur, "PAGO", detalle_pago or f"Pago a Titular #{p.id_titular}", fecha)
             _agregar_lineas_asiento(cur, id_asiento, [
-                (p.cod_cuenta, monto, 0, p.detalle),
-                (cuenta_fondo, 0, monto, p.detalle),
+                (p.cod_cuenta, monto, 0, detalle_pago),
+                (cuenta_fondo, 0, monto, detalle_pago),
             ])
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s)
                 RETURNING id
-            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo, id_asiento))
+            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, detalle_pago, -abs(total), p.id_fondo, id_asiento))
             id_pago = cur.fetchone()["id"]
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
             # Se anota en aplicaciones_pago, factura por factura, por el saldo real que le
@@ -1375,6 +1383,7 @@ class PagoECheqIn(BaseModel):
     cod_cuenta: str
     detalle: str
     ids_operaciones: list[int]
+    forzar_no_efectivo: bool = False
 
 @app.post("/registrar_pago_echeq")
 def registrar_pago_echeq(p: PagoECheqIn):
@@ -1382,8 +1391,12 @@ def registrar_pago_echeq(p: PagoECheqIn):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT es_informal FROM operaciones WHERE id = ANY(%s) AND es_informal = true LIMIT 1", (p.ids_operaciones,))
-            if cur.fetchone():
+            hay_informal = cur.fetchone()
+            if hay_informal and not p.forzar_no_efectivo:
                 return {"ok": False, "error_fondo_informal": True}
+            detalle_pago = p.detalle
+            if hay_informal and p.forzar_no_efectivo:
+                detalle_pago = f"[EXCEPCIÓN — pago no efectivo de operación informal] {p.detalle}"
             cur.execute("SELECT COALESCE(SUM(importe),0) FROM operaciones WHERE id = ANY(%s)", (p.ids_operaciones,))
             total = cur.fetchone()["coalesce"]
             fecha_emision = date.fromisoformat(p.fecha_emision)
@@ -1396,16 +1409,16 @@ def registrar_pago_echeq(p: PagoECheqIn):
             # Al emitir el cheque, se cancela la deuda con el Titular (Debe) y aparece una
             # deuda nueva: "Valores Emitidos — Cheques Pendientes" (Haber) — el cheque todavía
             # no salió del banco de verdad, eso pasa después, cuando se confirme el débito.
-            id_asiento = _crear_asiento(cur, "PAGO_ECHEQ", p.detalle or f"Cheque emitido #{p.nro_cheque}", fecha_emision)
+            id_asiento = _crear_asiento(cur, "PAGO_ECHEQ", detalle_pago or f"Cheque emitido #{p.nro_cheque}", fecha_emision)
             _agregar_lineas_asiento(cur, id_asiento, [
-                (p.cod_cuenta, monto, 0, p.detalle),
-                (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, p.detalle),
+                (p.cod_cuenta, monto, 0, detalle_pago),
+                (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, detalle_pago),
             ])
             cur.execute("""
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, false, %s)
                 RETURNING id
-            """, (fecha_vto.month, fecha_vto, str(p.id_titular), p.cod_cuenta, p.detalle, -abs(total), p.id_fondo, id_asiento))
+            """, (fecha_vto.month, fecha_vto, str(p.id_titular), p.cod_cuenta, detalle_pago, -abs(total), p.id_fondo, id_asiento))
             id_cashflow = cur.fetchone()["id"]
             cur.execute("""
                 INSERT INTO cheques_emitidos (nro_cheque, fecha_emision, fecha_vencimiento, estado, id_cashflow, id_asiento)
@@ -1445,6 +1458,7 @@ class PagoParcialIn(BaseModel):
     medio_pago: str = "TD"  # "TD" o "ECHEQ"
     nro_cheque: Optional[str] = None
     fecha_vencimiento: Optional[str] = None
+    forzar_no_efectivo: bool = False
 
 @app.post("/registrar_pago_parcial")
 def registrar_pago_parcial(p: PagoParcialIn):
@@ -1462,8 +1476,22 @@ def registrar_pago_parcial(p: PagoParcialIn):
             op = cur.fetchone()
             if not op:
                 return {"ok": False, "error": "Operación no encontrada."}
-            if op["es_informal"] and p.medio_pago == "ECHEQ":
+            # Antes esto solo bloqueaba ECHEQ — un pago parcial vía TD a un Fondo bancario para
+            # una operación informal pasaba sin ningún control, un agujero real. Ahora se chequea
+            # siempre el tipo de Fondo, con la misma excepción consciente que el resto.
+            fondo_no_efectivo = False
+            if op["es_informal"]:
+                if p.medio_pago == "ECHEQ":
+                    fondo_no_efectivo = True
+                else:
+                    cur.execute("SELECT tipo FROM fondos WHERE id = %s", (p.id_fondo,))
+                    fondo_row = cur.fetchone()
+                    fondo_no_efectivo = bool(fondo_row and fondo_row["tipo"] != "Efectivo")
+            if fondo_no_efectivo and not p.forzar_no_efectivo:
                 return {"ok": False, "error_fondo_informal": True}
+            detalle_pago = p.detalle
+            if fondo_no_efectivo and p.forzar_no_efectivo:
+                detalle_pago = f"[EXCEPCIÓN — pago no efectivo de operación informal] {p.detalle}"
 
             monto = abs(p.monto)
             if monto <= 0:
@@ -1477,21 +1505,21 @@ def registrar_pago_parcial(p: PagoParcialIn):
                 return {"ok": False, "error": f"El monto (${monto:,.2f}) supera el saldo pendiente (${saldo_pendiente:,.2f})."}
 
             tipo_asiento = "PAGO_ECHEQ" if p.medio_pago == "ECHEQ" else "PAGO"
-            id_asiento = _crear_asiento(cur, tipo_asiento, p.detalle or f"Pago parcial — operación #{p.id_operacion}", fecha)
+            id_asiento = _crear_asiento(cur, tipo_asiento, detalle_pago or f"Pago parcial — operación #{p.id_operacion}", fecha)
             if p.medio_pago == "ECHEQ":
                 # Mismo criterio que un ECheq completo: cancela parte de la deuda (Debe) y
                 # aparece "Valores Emitidos" (Haber) — todavía no salió del banco de verdad.
                 _agregar_lineas_asiento(cur, id_asiento, [
-                    (p.cod_cuenta, monto, 0, p.detalle),
-                    (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, p.detalle),
+                    (p.cod_cuenta, monto, 0, detalle_pago),
+                    (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, detalle_pago),
                 ])
             else:
                 cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (p.id_fondo,))
                 fila_fondo = cur.fetchone()
                 cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{p.id_fondo}")
                 _agregar_lineas_asiento(cur, id_asiento, [
-                    (p.cod_cuenta, monto, 0, p.detalle),
-                    (cuenta_fondo, 0, monto, p.detalle),
+                    (p.cod_cuenta, monto, 0, detalle_pago),
+                    (cuenta_fondo, 0, monto, detalle_pago),
                 ])
 
             if p.medio_pago == "ECHEQ" and (not p.nro_cheque or not p.fecha_vencimiento):
@@ -1505,7 +1533,7 @@ def registrar_pago_parcial(p: PagoParcialIn):
                 INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (fecha_vto.month, fecha_vto, str(op["id_titular"]), p.cod_cuenta, p.detalle, -monto, p.id_fondo, confirmado_pago, id_asiento))
+            """, (fecha_vto.month, fecha_vto, str(op["id_titular"]), p.cod_cuenta, detalle_pago, -monto, p.id_fondo, confirmado_pago, id_asiento))
             id_cashflow_pago = cur.fetchone()["id"]
 
             if p.medio_pago == "ECHEQ":
