@@ -3830,6 +3830,33 @@ def get_lineas_asiento(id: int):
     finally:
         conn.close()
 
+@app.get("/formales_pagadas_efectivo")
+def get_formales_pagadas_efectivo():
+    """Registro paralelo, pensado para el futuro Módulo Ventas — hoy no hay forma de distinguir
+    qué parte del Efectivo disponible viene de ventas formales vs. informales, así que mientras
+    tanto se deja anotado acá cada pago (completo o parcial) de una factura FORMAL que se hizo
+    con un Fondo de tipo Efectivo — dato que después va a servir de base real para esa
+    distinción, sin tener que reconstruir nada. Sacado de aplicaciones_pago (captura cada pago,
+    completo o parcial, sin cálculo indirecto)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ap.id, ap.fecha, o.numero_comprobante, t.nombre AS titular,
+                       ap.monto, f.nombre AS fondo
+                FROM aplicaciones_pago ap
+                JOIN operaciones o ON o.id = ap.id_operacion AND o.es_informal = false
+                LEFT JOIN titulares t ON t.id::text = o.id_titular::text
+                JOIN cashflow c ON c.id = ap.id_cashflow
+                JOIN fondos f ON f.id = c.id_fondo AND f.tipo = 'Efectivo'
+                ORDER BY ap.fecha DESC
+            """)
+            filas = cur.fetchall()
+            total = sum(float(f["monto"]) for f in filas)
+            return {"filas": filas, "total": round(total, 2)}
+    finally:
+        conn.close()
+
 @app.get("/cheques_pendientes")
 def get_cheques_pendientes():
     """Todo cheque emitido que todavía no se debitó — sacado directo de las tablas reales
