@@ -1302,8 +1302,11 @@ class PagoIn(BaseModel):
     cod_cuenta: str
     detalle: str
     ids_operaciones: list[int]
-    medio_pago: str = "TD"
+    medio_pago: str = "TD"  # "TD", "ECHEQ" o "EFECTIVO"
     forzar_no_efectivo: bool = False
+    cantidad_moneda: Optional[float] = None    # si el Fondo es USD: cuántos dólares reales se pagaron
+    cotizacion_pactada: Optional[float] = None # la cotización con la que se saldó la deuda (en pesos)
+    cotizacion_real: Optional[float] = None    # la cotización real de hoy, para valuar el Fondo
 
 @app.post("/registrar_pago")
 def registrar_pago(p: PagoIn):
@@ -1337,15 +1340,31 @@ def registrar_pago(p: PagoIn):
             cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{p.id_fondo}")
             monto = abs(total)
             id_asiento = _crear_asiento(cur, "PAGO", detalle_pago or f"Pago a Titular #{p.id_titular}", fecha)
-            _agregar_lineas_asiento(cur, id_asiento, [
-                (p.cod_cuenta, monto, 0, detalle_pago),
-                (cuenta_fondo, 0, monto, detalle_pago),
-            ])
+            hay_conversion = p.cantidad_moneda is not None and p.cotizacion_pactada is not None and p.cotizacion_real is not None
+            diferencia = None
+            if hay_conversion:
+                # Efectivo en USD: la deuda se cancela a la cotización pactada (Debe), el Fondo
+                # sale a la cotización REAL de hoy (Haber) — la diferencia entre ambas es
+                # Ganancia o Pérdida por Tenencia, mismo criterio que ya usa Movimiento Manual.
+                monto_real = round(abs(p.cantidad_moneda) * p.cotizacion_real, 2)
+                lineas = [(p.cod_cuenta, monto, 0, detalle_pago), (cuenta_fondo, 0, monto_real, detalle_pago)]
+                diferencia = round(monto - monto_real, 2)
+                if diferencia > 0.01:
+                    lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), 0, diferencia, detalle_pago))
+                elif diferencia < -0.01:
+                    lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), abs(diferencia), 0, detalle_pago))
+                _agregar_lineas_asiento(cur, id_asiento, lineas)
+            else:
+                _agregar_lineas_asiento(cur, id_asiento, [
+                    (p.cod_cuenta, monto, 0, detalle_pago),
+                    (cuenta_fondo, 0, monto, detalle_pago),
+                ])
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s)
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento, cantidad_moneda)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s, %s)
                 RETURNING id
-            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, detalle_pago, -abs(total), p.id_fondo, id_asiento))
+            """, (fecha.month, fecha, str(p.id_titular), p.cod_cuenta, detalle_pago, -abs(total), p.id_fondo, id_asiento,
+                  -abs(p.cantidad_moneda) if hay_conversion else None))
             id_pago = cur.fetchone()["id"]
             cur.execute("UPDATE operaciones SET id_pago = %s WHERE id = ANY(%s)", (id_pago, p.ids_operaciones))
             # Se anota en aplicaciones_pago, factura por factura, por el saldo real que le
@@ -1370,7 +1389,7 @@ def registrar_pago(p: PagoIn):
                 {"tabla": "cashflow", "where_columna": "id_asiento", "where_valor": id_asiento, "tipo": "DELETE"},
             ])
         conn.commit()
-        return {"ok": True, "id_pago": id_pago, "total": total}
+        return {"ok": True, "id_pago": id_pago, "total": total, "diferencia_tenencia": diferencia}
     finally:
         conn.close()
 
@@ -1455,10 +1474,13 @@ class PagoParcialIn(BaseModel):
     cod_cuenta: str
     detalle: str
     monto: float
-    medio_pago: str = "TD"  # "TD" o "ECHEQ"
+    medio_pago: str = "TD"  # "TD", "ECHEQ" o "EFECTIVO"
     nro_cheque: Optional[str] = None
     fecha_vencimiento: Optional[str] = None
     forzar_no_efectivo: bool = False
+    cantidad_moneda: Optional[float] = None
+    cotizacion_pactada: Optional[float] = None
+    cotizacion_real: Optional[float] = None
 
 @app.post("/registrar_pago_parcial")
 def registrar_pago_parcial(p: PagoParcialIn):
@@ -1506,6 +1528,8 @@ def registrar_pago_parcial(p: PagoParcialIn):
 
             tipo_asiento = "PAGO_ECHEQ" if p.medio_pago == "ECHEQ" else "PAGO"
             id_asiento = _crear_asiento(cur, tipo_asiento, detalle_pago or f"Pago parcial — operación #{p.id_operacion}", fecha)
+            hay_conversion = p.medio_pago == "EFECTIVO" and p.cantidad_moneda is not None and p.cotizacion_pactada is not None and p.cotizacion_real is not None
+            diferencia_tenencia = None
             if p.medio_pago == "ECHEQ":
                 # Mismo criterio que un ECheq completo: cancela parte de la deuda (Debe) y
                 # aparece "Valores Emitidos" (Haber) — todavía no salió del banco de verdad.
@@ -1513,6 +1537,21 @@ def registrar_pago_parcial(p: PagoParcialIn):
                     (p.cod_cuenta, monto, 0, detalle_pago),
                     (_cuenta(cur, "VALORES_EMITIDOS"), 0, monto, detalle_pago),
                 ])
+            elif hay_conversion:
+                # Efectivo en USD: la deuda se cancela a la cotización pactada (Debe), el
+                # Fondo sale a la cotización REAL de hoy (Haber) — la diferencia es Ganancia
+                # o Pérdida por Tenencia, mismo criterio que Movimiento Manual.
+                cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (p.id_fondo,))
+                fila_fondo = cur.fetchone()
+                cuenta_fondo = (fila_fondo["cuenta_patrimonial"] if fila_fondo else None) or (fila_fondo["nombre"] if fila_fondo else f"Fondo #{p.id_fondo}")
+                monto_real = round(abs(p.cantidad_moneda) * p.cotizacion_real, 2)
+                lineas = [(p.cod_cuenta, monto, 0, detalle_pago), (cuenta_fondo, 0, monto_real, detalle_pago)]
+                diferencia_tenencia = round(monto - monto_real, 2)
+                if diferencia_tenencia > 0.01:
+                    lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), 0, diferencia_tenencia, detalle_pago))
+                elif diferencia_tenencia < -0.01:
+                    lineas.append((_cuenta(cur, "RESULTADO_TENENCIA_ME"), abs(diferencia_tenencia), 0, detalle_pago))
+                _agregar_lineas_asiento(cur, id_asiento, lineas)
             else:
                 cur.execute("SELECT cuenta_patrimonial, nombre FROM fondos WHERE id = %s", (p.id_fondo,))
                 fila_fondo = cur.fetchone()
@@ -1525,15 +1564,16 @@ def registrar_pago_parcial(p: PagoParcialIn):
             if p.medio_pago == "ECHEQ" and (not p.nro_cheque or not p.fecha_vencimiento):
                 return {"ok": False, "error": "Falta número o fecha de vencimiento del ECheq."}
             fecha_vto = date.fromisoformat(p.fecha_vencimiento) if p.medio_pago == "ECHEQ" else fecha
-            confirmado_pago = (p.medio_pago == "TD")
+            confirmado_pago = (p.medio_pago != "ECHEQ")
             # La fila de Tesorería queda fechada al día del DÉBITO real — la de emisión para
             # un ECheq (fecha), la del pago en sí para una Transferencia — nunca la de emisión
             # cuando son distintas, si no el movimiento aparece en la fecha equivocada.
             cur.execute("""
-                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO cashflow (mes, fecha, id_titular, cod_cuenta, detalle, importe, id_fondo, confirmado, id_asiento, cantidad_moneda)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (fecha_vto.month, fecha_vto, str(op["id_titular"]), p.cod_cuenta, detalle_pago, -monto, p.id_fondo, confirmado_pago, id_asiento))
+            """, (fecha_vto.month, fecha_vto, str(op["id_titular"]), p.cod_cuenta, detalle_pago, -monto, p.id_fondo, confirmado_pago, id_asiento,
+                  -abs(p.cantidad_moneda) if hay_conversion else None))
             id_cashflow_pago = cur.fetchone()["id"]
 
             if p.medio_pago == "ECHEQ":
@@ -1587,7 +1627,7 @@ def registrar_pago_parcial(p: PagoParcialIn):
                 })
             _set_reversion(cur, id_asiento, reversion_acciones)
         conn.commit()
-        return {"ok": True, "id_cashflow": id_cashflow_pago, "monto": monto, "saldo_restante": max(round(nuevo_saldo, 2), 0)}
+        return {"ok": True, "id_cashflow": id_cashflow_pago, "monto": monto, "saldo_restante": max(round(nuevo_saldo, 2), 0), "diferencia_tenencia": diferencia_tenencia}
     finally:
         conn.close()
 
